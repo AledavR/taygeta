@@ -31,6 +31,7 @@ from typing import Any
 
 import streamlit as st
 
+from taygeta.agents.embeddings import Embedder, question_embedding_text
 from taygeta.core.schema import (
     Choice,
     EnrichedQuestion,
@@ -323,12 +324,18 @@ def persist_approved_questions(
     storage: ObjectStorage | None = None,
     *,
     session_id: str | None = None,
+    embedder: Embedder | None = None,
 ) -> ConfirmResult:
     """Persiste las preguntas aprobadas tras verificar sus figuras en el bucket.
 
     Usa ``upsert_question`` para que la confirmación sea idempotente. Solo marca
     la sesión de staging como ``CONFIRMED`` cuando ha guardado alguna pregunta.
+    Genera (best-effort) el embedding de cada pregunta para la deduplicación
+    semántica posterior; si el proveedor no está disponible, se omite sin
+    bloquear la confirmación.
     """
+    if embedder is None:
+        embedder = Embedder(get_settings())
     result = ConfirmResult()
     for question in questions:
         try:
@@ -339,7 +346,7 @@ def persist_approved_questions(
                 )
                 continue
             database.add_prerequisites(list(question.prerequisites))
-            database.upsert_question(question)
+            database.upsert_question(question, embedding=_embed_or_none(embedder, question))
             result.saved.append(question.id)
         except Exception as exc:  # noqa: BLE001 - se informa al usuario, no se oculta
             result.errors.append(f"{question.id}: {exc}")
@@ -350,6 +357,15 @@ def persist_approved_questions(
         except DatabaseError as exc:
             result.errors.append(f"no se pudo marcar la sesión como confirmada: {exc}")
     return result
+
+
+def _embed_or_none(embedder: Embedder, question: EnrichedQuestion) -> list[float] | None:
+    """Genera el embedding de una pregunta sin elevar ante fallos del proveedor."""
+    try:
+        return embedder.embed(question_embedding_text(question))
+    except Exception:  # noqa: BLE001 - la deduplicación semántica es opcional
+        logger.warning("no se pudo generar el embedding de la pregunta %s", question.id)
+        return None
 
 
 # ---------------------------------------------------------------------------

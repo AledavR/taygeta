@@ -21,11 +21,12 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from taygeta.core.embedding import cosine_similarity, decode_embedding, encode_embedding
 from taygeta.core.schema import compute_canonical_hash, utc_now_iso
 from taygeta.core.settings import Settings, get_settings
 
@@ -41,7 +42,7 @@ __all__ = [
 ]
 
 #: Versión lógica del esquema, registrada en ``schema_meta``.
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 #: Estados admitidos para una sesión de staging.
 STAGING_STATUSES: tuple[str, ...] = ("VALID", "NEEDS_ATTENTION", "CONFIRMED", "DISCARDED")
@@ -85,7 +86,8 @@ CREATE TABLE IF NOT EXISTS questions (
     difficulty          INTEGER NOT NULL CHECK (difficulty BETWEEN 1 AND 5),
     prerequisites_json  TEXT NOT NULL DEFAULT '[]',
     payload_json        TEXT NOT NULL,
-    created_at          TEXT NOT NULL
+    created_at          TEXT NOT NULL,
+    embedding_json      TEXT
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS questions_fts USING fts5(
@@ -223,6 +225,7 @@ class Database:
                 if not self.is_memory:
                     connection.execute("PRAGMA journal_mode = WAL")
                 connection.executescript(_SCHEMA_SQL)
+                self._migrate_schema(connection)
                 connection.execute(
                     "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?) "
                     "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -241,6 +244,20 @@ class Database:
             return True
         except sqlite3.Error:
             return False
+
+    @staticmethod
+    def _migrate_schema(connection: sqlite3.Connection) -> None:
+        """Aplica migraciones incrementales a bases de datos ya existentes.
+
+        ``CREATE TABLE IF NOT EXISTS`` no altera tablas preexistentes, por lo que
+        las columnas añadidas en versiones posteriores del esquema se crean aquí
+        de forma idempotente (por ejemplo ``questions.embedding_json``).
+        """
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(questions)").fetchall()
+        }
+        if "embedding_json" not in columns:
+            connection.execute("ALTER TABLE questions ADD COLUMN embedding_json TEXT")
 
     def rebuild_fts(self) -> int:
         """Regenera ``questions_fts`` desde ``questions`` y devuelve el número de filas."""
@@ -262,25 +279,24 @@ class Database:
             ).fetchone()
         return row is not None
 
-    def insert_question(self, question: EnrichedQuestion) -> str:
+    def insert_question(
+        self, question: EnrichedQuestion, *, embedding: Sequence[float] | None = None
+    ) -> str:
         """Inserta una pregunta nueva y devuelve el estado de la inserción.
 
         En entorno ``local`` calcula el ``canonical_hash`` del enunciado y, si ya
         existe una pregunta con el mismo hash en el mismo curso, bloquea la
-        inserción devolviendo ``"DUPLICATE"``. En cualquier otro caso inserta la
-        fila y devuelve ``"INSERTED"``.
+        inserción devolviendo ``"DUPLICATE"``. El ``embedding`` (opcional) se
+        almacena para la deduplicación semántica posterior.
 
         Raises:
             DatabaseError: si ya existe una pregunta con el mismo ``id``.
         """
-        # TODO(Capa B): sustituir la comparación exacta de ``canonical_hash`` por
-        # una búsqueda de similitud vectorial en pgvector para detectar duplicados
-        # semánticos (no solo literales) a escala de producción.
         if self.settings.APP_ENV == "local":
             question = question.model_copy(
                 update={"canonical_hash": compute_canonical_hash(question.statement_raw)}
             )
-        values = self._question_values(question)
+        values = self._question_values(question, embedding)
         with self.connect() as connection:
             if self.settings.APP_ENV == "local":
                 duplicate = connection.execute(
@@ -295,47 +311,72 @@ class Database:
                 connection.execute(
                     "INSERT INTO questions("
                     "id, course, topic, subtopic, difficulty, prerequisites_json, "
-                    "payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    "payload_json, created_at, embedding_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     values,
                 )
             except sqlite3.IntegrityError as exc:
                 raise DatabaseError(f"ya existe una pregunta con id {question.id!r}") from exc
         return "INSERTED"
 
-    def update_question(self, question: EnrichedQuestion) -> None:
+    def update_question(
+        self, question: EnrichedQuestion, *, embedding: Sequence[float] | None = None
+    ) -> None:
         """Actualiza una pregunta existente y sincroniza FTS5.
+
+        Si ``embedding`` es ``None``, el embedding almacenado se conserva tal cual
+        (no se borra); para vaciarlo explícitamente pásese una lista vacía.
 
         Raises:
             DatabaseError: si la pregunta no existe.
         """
-        values = self._question_values(question)
+        values = self._question_values(question, embedding)
         with self.connect() as connection:
-            cursor = connection.execute(
-                "UPDATE questions SET course = ?, topic = ?, subtopic = ?, difficulty = ?, "
-                "prerequisites_json = ?, payload_json = ?, created_at = ? WHERE id = ?",
-                (
-                    values[1],
-                    values[2],
-                    values[3],
-                    values[4],
-                    values[5],
-                    values[6],
-                    values[7],
-                    values[0],
-                ),
-            )
+            if embedding is None:
+                cursor = connection.execute(
+                    "UPDATE questions SET course = ?, topic = ?, subtopic = ?, difficulty = ?, "
+                    "prerequisites_json = ?, payload_json = ?, created_at = ? WHERE id = ?",
+                    (
+                        values[1],
+                        values[2],
+                        values[3],
+                        values[4],
+                        values[5],
+                        values[6],
+                        values[7],
+                        values[0],
+                    ),
+                )
+            else:
+                cursor = connection.execute(
+                    "UPDATE questions SET course = ?, topic = ?, subtopic = ?, difficulty = ?, "
+                    "prerequisites_json = ?, payload_json = ?, created_at = ?, embedding_json = ? "
+                    "WHERE id = ?",
+                    (
+                        values[1],
+                        values[2],
+                        values[3],
+                        values[4],
+                        values[5],
+                        values[6],
+                        values[7],
+                        values[8],
+                        values[0],
+                    ),
+                )
             if cursor.rowcount == 0:
                 raise DatabaseError(f"no existe una pregunta con id {question.id!r}")
 
-    def upsert_question(self, question: EnrichedQuestion) -> None:
+    def upsert_question(
+        self, question: EnrichedQuestion, *, embedding: Sequence[float] | None = None
+    ) -> None:
         """Inserta o reemplaza una pregunta manteniendo FTS5 coherente."""
-        values = self._question_values(question)
+        values = self._question_values(question, embedding)
         with self.connect() as connection:
             connection.execute("DELETE FROM questions WHERE id = ?", (question.id,))
             connection.execute(
                 "INSERT INTO questions("
                 "id, course, topic, subtopic, difficulty, prerequisites_json, "
-                "payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "payload_json, created_at, embedding_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 values,
             )
 
@@ -362,6 +403,12 @@ class Database:
         with self.connect() as connection:
             row = connection.execute("SELECT count(*) AS c FROM questions").fetchone()
         return int(row["c"])
+
+    def list_question_ids(self) -> list[str]:
+        """Devuelve los identificadores de todas las preguntas, ordenados por id."""
+        with self.connect() as connection:
+            rows = connection.execute("SELECT id FROM questions ORDER BY id").fetchall()
+        return [row["id"] for row in rows]
 
     def list_questions(
         self,
@@ -577,6 +624,65 @@ class Database:
                 subtopics.append(subtopic)
         return tree
 
+    # -- Deduplicación semántica -------------------------------------------
+    def get_embedding(self, question_id: str) -> list[float] | None:
+        """Devuelve el embedding almacenado de una pregunta, o ``None`` si no tiene."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT embedding_json FROM questions WHERE id = ?", (question_id,)
+            ).fetchone()
+        if row is None or not row["embedding_json"]:
+            return None
+        return decode_embedding(row["embedding_json"])
+
+    def list_embeddings(self, *, course: str | None = None) -> list[tuple[str, list[float]]]:
+        """Lista ``(id, embedding)`` de las preguntas que ya tienen vector.
+
+        Se usa para calcular la similitud coseno en memoria (el volumen actual es
+        bajo). Si se indica ``course``, se restringe a ese curso.
+        """
+        if course is not None:
+            sql = (
+                "SELECT id, embedding_json FROM questions "
+                "WHERE course = ? AND embedding_json IS NOT NULL ORDER BY id"
+            )
+            params: tuple[Any, ...] = (course,)
+        else:
+            sql = (
+                "SELECT id, embedding_json FROM questions "
+                "WHERE embedding_json IS NOT NULL ORDER BY id"
+            )
+            params = ()
+        with self.connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        result: list[tuple[str, list[float]]] = []
+        for row in rows:
+            vector = decode_embedding(row["embedding_json"])
+            if vector:
+                result.append((row["id"], vector))
+        return result
+
+    def find_similar_questions(
+        self,
+        embedding: Sequence[float],
+        *,
+        threshold: float,
+        course: str | None = None,
+        limit: int = 5,
+    ) -> list[tuple[str, float]]:
+        """Devuelve las preguntas con similitud coseno >= ``threshold``.
+
+        Ordena por similitud descendente y acota a ``limit`` resultados. Compara
+        solo contra preguntas que ya tienen embedding almacenado.
+        """
+        matches: list[tuple[str, float]] = []
+        for question_id, vector in self.list_embeddings(course=course):
+            similarity = cosine_similarity(embedding, vector)
+            if similarity >= threshold:
+                matches.append((question_id, similarity))
+        matches.sort(key=lambda item: item[1], reverse=True)
+        return matches[:limit]
+
     # -- Staging ------------------------------------------------------------
     def create_staging_session(
         self,
@@ -706,7 +812,9 @@ class Database:
             )
 
     @staticmethod
-    def _question_values(question: EnrichedQuestion) -> tuple[Any, ...]:
+    def _question_values(
+        question: EnrichedQuestion, embedding: Sequence[float] | None = None
+    ) -> tuple[Any, ...]:
         return (
             question.id,
             question.course,
@@ -716,6 +824,7 @@ class Database:
             json.dumps(question.prerequisites, ensure_ascii=False),
             question.model_dump_json(),
             question.created_at,
+            encode_embedding(embedding),
         )
 
 

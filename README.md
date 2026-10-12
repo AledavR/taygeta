@@ -325,6 +325,8 @@ LLM_BASE_URL=           # p.ej. https://mi-proveedor.example/v1
 LLM_MODEL=              # identificador del modelo elegido por el administrador
 LLM_TIMEOUT_SECONDS=120
 LLM_MAX_RETRIES=2
+LLM_EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2   # embeddings locales
+DUPLICATE_SIMILARITY_THRESHOLD=0.85          # umbral coseno (0-1) de candidato a duplicado
 ```
 
 Diagnóstico:
@@ -338,6 +340,32 @@ curl -s "${LLM_BASE_URL%/}/models" -H "Authorization: Bearer ${LLM_API_KEY}" | h
 
 > No se fija ningún proveedor ni modelo en el código. `LLM_API_KEY` es solo la
 > credencial; no contiene el endpoint, el modelo ni parámetros.
+
+### Deduplicación semántica
+
+Además de la deduplicación por hash exacto, la ingesta calcula un **embedding**
+**local** del enunciado y sus alternativas con `sentence-transformers`
+(`LLM_EMBEDDING_MODEL`, sin API externa ni `LLM_API_KEY`) y lo compara por
+similitud coseno contra las preguntas ya almacenadas del mismo curso. Si supera
+`DUPLICATE_SIMILARITY_THRESHOLD`, la pregunta queda marcada como candidata y un
+juez LLM decide si es matemáticamente la misma (ignorando variaciones de
+notación/OCR). Si se confirma, se descarta el texto nuevo y se fusionan los
+`source_reference` y prerrequisitos en la pregunta existente. Nunca se
+almacenan soluciones ni respuestas correctas.
+
+Los pesos del modelo se descargan/cachean la primera vez que se generan
+embeddings (igual que los del OCR); también puede usarse una ruta local en
+`LLM_EMBEDDING_MODEL`.
+
+Para migrar preguntas ya existentes (generar embeddings y fusionar duplicados):
+
+```bash
+uv run python scripts/deduplicate_questions.py --db /ruta/a/taygeta.db --dry-run
+uv run python scripts/deduplicate_questions.py --db /ruta/a/taygeta.db
+```
+
+Si el modelo no está disponible (sin pesos ni red), la deduplicación semántica
+se desactiva de forma controlada y se conserva la de hash exacto.
 
 ---
 

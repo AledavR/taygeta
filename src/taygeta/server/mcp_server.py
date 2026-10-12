@@ -40,6 +40,7 @@ from taygeta.domain.taxonomy import format_course_name
 from taygeta.ingest.pipeline import IngestPipeline, StagingResult
 from taygeta.ingest.validator import STATUS_NEEDS_ATTENTION, STATUS_VALID
 from taygeta.server.db import Database
+from taygeta.server.deduplication import DeduplicationService
 from taygeta.server.exam_generator import ExamGenerationError, ExamGenerator
 from taygeta.server.object_storage import ObjectStorage, ObjectStorageError
 
@@ -177,7 +178,9 @@ def stage_exam_upload(file_path: str, auto_commit: bool = True) -> str:
     ]
 
     if auto_commit and result.status == STATUS_VALID and not problems:
-        saved, save_problems = _save_headless(result, database, storage)
+        saved, save_problems = _save_headless(
+            result, database, storage, DeduplicationService(database)
+        )
         if not save_problems:
             return _json(
                 {
@@ -289,6 +292,7 @@ def confirm_staged_upload(session_id: str) -> str:
     """
     try:
         _settings, database, storage, _pipeline, _exams = _resources()
+        dedup = DeduplicationService(database)
         session = database.get_staging_session(session_id)
         if session is None:
             return _json({"status": "error", "message": f"sesión no encontrada: {session_id}"})
@@ -315,7 +319,7 @@ def confirm_staged_upload(session_id: str) -> str:
                 database.add_prerequisites(list(question.prerequisites))
                 database.upsert_course(question.course, format_course_name(question.course))
                 database.upsert_topic(question.course, question.topic, question.subtopic)
-                database.upsert_question(question)
+                database.upsert_question(question, embedding=dedup.embed_question(question))
                 saved.append(question.id)
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{payload.get('id', '?')}: {exc}")
@@ -460,12 +464,13 @@ def _save_headless(
     result: StagingResult,
     database: Database,
     storage: ObjectStorage,
+    dedup: DeduplicationService,
 ) -> tuple[list[str], list[dict[str, Any]]]:
     """Persiste automáticamente las preguntas VALID de una ingesta headless.
 
-    Usa ``insert_question`` para detectar duplicados (estado ``DUPLICATE``) y
-    captura cualquier excepción como ``ERROR``. Devuelve los ids guardados y la
-    lista de incidencias.
+    Usa :class:`DeduplicationService` para detectar duplicados semánticos (por
+    embeddings y, opcionalmente, juez LLM) y captura cualquier excepción como
+    ``ERROR``. Devuelve los ids guardados y la lista de incidencias.
     """
     saved: list[str] = []
     problems: list[dict[str, Any]] = []
@@ -494,13 +499,17 @@ def _save_headless(
             database.add_prerequisites(list(enriched.prerequisites))
             database.upsert_course(enriched.course, format_course_name(enriched.course))
             database.upsert_topic(enriched.course, enriched.topic, enriched.subtopic)
-            outcome = database.insert_question(enriched)
+            outcome = dedup.ingest(enriched)
         except Exception as exc:  # noqa: BLE001
             problems.append({"id": question.id, "status": "ERROR", "reasons": [str(exc)]})
             continue
-        if outcome == "DUPLICATE":
+        if outcome.status == "DUPLICATE":
             problems.append(
-                {"id": question.id, "status": "DUPLICATE", "reasons": ["pregunta duplicada"]}
+                {
+                    "id": question.id,
+                    "status": "DUPLICATE",
+                    "reasons": [outcome.reason or "pregunta duplicada"],
+                }
             )
         else:
             saved.append(question.id)
