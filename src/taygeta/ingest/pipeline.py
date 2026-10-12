@@ -287,6 +287,7 @@ class StagingResult:
     questions: list[StagedQuestion] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     session_id: str | None = None
+    intermediate: TranscriptionIntermediate | None = None
 
     @property
     def valid_count(self) -> int:
@@ -439,7 +440,7 @@ class IngestPipeline:
                     )
                 )
                 continue
-            staged.append(self._validate_question(item.question, max_pages=len(rasters)))
+            staged.append(self.validate_question(item.question, max_pages=len(rasters)))
 
         overall = (
             STATUS_VALID
@@ -451,11 +452,14 @@ class IngestPipeline:
             status=overall,
             questions=staged,
             warnings=warnings,
+            intermediate=intermediate,
         )
         return self._finish(result, persist_staging, session_id)
 
-    # -- Internos -----------------------------------------------------------
-    def _validate_question(self, question: QuestionRaw, *, max_pages: int) -> StagedQuestion:
+    def validate_question(
+        self, question: QuestionRaw, *, max_pages: int | None = None
+    ) -> StagedQuestion:
+        """Ejecuta las dos capas de validación sobre una pregunta y la clasifica."""
         local = validate_local(question, max_pages=max_pages)
         reasons: list[str] = []
 
@@ -482,6 +486,35 @@ class IngestPipeline:
             logical=logical,
         )
 
+    def refine_question(
+        self,
+        intermediate: TranscriptionIntermediate,
+        question_index: int,
+        *,
+        hints: str | None = None,
+    ) -> StagedQuestion:
+        """Reanaliza una pregunta con contexto correctivo y la revalida.
+
+        Vuelve a ejecutar el Pase 2 (instructor) sobre el texto transcrito con el
+        ``hints`` del revisor y aplica las dos capas de validación. No resuelve
+        el ejercicio.
+        """
+        structured = self.structurer.structure(intermediate, hints=hints)
+        if question_index < 0 or question_index >= len(structured):
+            raise StructuringError(
+                f"índice de pregunta {question_index} fuera de rango (0..{len(structured) - 1})"
+            )
+        item = structured[question_index]
+        if item.question is None:
+            return StagedQuestion(
+                question=None,
+                status=STATUS_NEEDS_ATTENTION,
+                reasons=[item.error or "el reanálisis no produjo una pregunta válida"],
+            )
+        max_pages = len(intermediate.pages) or None
+        return self.validate_question(item.question, max_pages=max_pages)
+
+    # -- Internos -----------------------------------------------------------
     def _detect_and_store_figures(
         self, source: Path, upload: bool, warnings: list[str]
     ) -> list[FigureReference]:
@@ -550,6 +583,9 @@ class IngestPipeline:
             "source_reference": result.source_reference,
             "status": result.status,
             "warnings": result.warnings,
+            "intermediate": (
+                result.intermediate.model_dump() if result.intermediate is not None else None
+            ),
             "questions": [
                 {
                     "status": item.status,
