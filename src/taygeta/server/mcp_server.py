@@ -36,6 +36,7 @@ from taygeta.core.schema import (
 )
 from taygeta.core.settings import Settings, get_settings
 from taygeta.core.urls import build_public_url, build_relative_path, split_asset_reference
+from taygeta.domain.taxonomy import format_course_name
 from taygeta.ingest.pipeline import IngestPipeline, StagingResult
 from taygeta.ingest.validator import STATUS_NEEDS_ATTENTION, STATUS_VALID
 from taygeta.server.db import Database
@@ -312,6 +313,8 @@ def confirm_staged_upload(session_id: str) -> str:
                 continue
             try:
                 database.add_prerequisites(list(question.prerequisites))
+                database.upsert_course(question.course, format_course_name(question.course))
+                database.upsert_topic(question.course, question.topic, question.subtopic)
                 database.upsert_question(question)
                 saved.append(question.id)
             except Exception as exc:  # noqa: BLE001
@@ -489,6 +492,8 @@ def _save_headless(
                 )
                 continue
             database.add_prerequisites(list(enriched.prerequisites))
+            database.upsert_course(enriched.course, format_course_name(enriched.course))
+            database.upsert_topic(enriched.course, enriched.topic, enriched.subtopic)
             outcome = database.insert_question(enriched)
         except Exception as exc:  # noqa: BLE001
             problems.append({"id": question.id, "status": "ERROR", "reasons": [str(exc)]})

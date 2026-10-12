@@ -44,6 +44,7 @@ from taygeta.core.schema import (
 )
 from taygeta.core.settings import Settings, get_settings
 from taygeta.core.urls import build_relative_path, split_asset_reference
+from taygeta.domain.taxonomy import format_course_name
 from taygeta.ingest.image_extractor import (
     is_supported_source,
     open_document,
@@ -706,7 +707,7 @@ def _confirm(
     new_tags = sorted({slug for _, slugs in approved for slug in slugs})
     try:
         for question, _ in approved:
-            database.upsert_course(question.course, question.course)
+            database.upsert_course(question.course, format_course_name(question.course))
             database.upsert_topic(question.course, question.topic, question.subtopic)
         if new_tags:
             database.add_prerequisites(new_tags)
