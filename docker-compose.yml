@@ -58,7 +58,7 @@ services:
       ocr:
         condition: service_started
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
       interval: 30s
       timeout: 5s
       retries: 5
@@ -88,24 +88,28 @@ services:
       ocr:
         condition: service_started
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8501/_stcore/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8501/_stcore/health"]
       interval: 30s
       timeout: 5s
       retries: 5
       start_period: 30s
 
   # Variante CPU neutral. Los overrides ROCm/CUDA sustituyen build/image.
+  # `on-failure:5`: si faltan los pesos, el contenedor termina con un estado
+  # claro en lugar de reiniciarse indefinidamente.
   ocr:
     build:
       context: .
       dockerfile: docker/ocr/Dockerfile.cpu
     image: taygeta-ocr:cpu
-    restart: unless-stopped
+    restart: "on-failure:5"
     expose:
       - "8080"
     environment:
-      OCR_MODEL_PATH: ${OCR_MODEL_PATH:-/models/model.gguf}
-      OCR_MMPROJ_PATH: ${OCR_MMPROJ_PATH:-}
+      OCR_MODEL_PATH: ${OCR_MODEL_PATH:-/models/Qwen2-VL-7B-Instruct-Q4_K_M.gguf}
+      OCR_MODEL_URL: ${OCR_MODEL_URL:-https://huggingface.co/bartowski/Qwen2-VL-7B-Instruct-GGUF/resolve/main/Qwen2-VL-7B-Instruct-Q4_K_M.gguf}
+      OCR_MMPROJ_PATH: ${OCR_MMPROJ_PATH:-/models/mmproj-Qwen2-VL-7B-Instruct-f16.gguf}
+      OCR_MMPROJ_URL: ${OCR_MMPROJ_URL:-https://huggingface.co/bartowski/Qwen2-VL-7B-Instruct-GGUF/resolve/main/mmproj-Qwen2-VL-7B-Instruct-f16.gguf}
       OCR_MODEL: ${OCR_MODEL:-}
       OCR_CONTEXT_SIZE: ${OCR_CONTEXT_SIZE:-8192}
       OCR_CONCURRENCY: ${OCR_CONCURRENCY:-1}
@@ -116,7 +120,7 @@ services:
       - ocr-models:/models
       - ocr-cache:/cache
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
       interval: 30s
       timeout: 5s
       retries: 10
@@ -132,7 +136,7 @@ services:
     volumes:
       - seaweedfs-master-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O- http://localhost:9333/cluster/status >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:9333/cluster/status >/dev/null 2>&1 || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -154,7 +158,7 @@ services:
       seaweedfs-master:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O- http://localhost:8080/status >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O- http://seaweedfs-volume:8080/status >/dev/null 2>&1 || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -175,7 +179,7 @@ services:
       seaweedfs-master:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O- http://localhost:8888/ >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8888/ >/dev/null 2>&1 || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -183,18 +187,24 @@ services:
 
   # Gateway S3 con credenciales configuradas (no lectura pública anónima).
   # El host interno estable es seaweedfs-s3:8333.
+  # El fichero IAM se genera en el arranque a partir de S3_ACCESS_KEY_ID /
+  # S3_SECRET_ACCESS_KEY, de modo que las credenciales del gateway y de la
+  # aplicación proceden de la MISMA variable de entorno (.env). El esquema del
+  # fichero queda documentado en docker/seaweedfs/s3.json.example.
   seaweedfs-s3:
     image: chrislusf/seaweedfs:4.48
     restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
     command:
-      - s3
-      - -filer=seaweedfs-filer:8888
-      - -port=8333
-      - -config=/etc/seaweedfs/s3.json
+      - |
+        set -e
+        printf '{"identities":[{"name":"taygeta","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List","Tagging"]}]}' "$$S3_ACCESS_KEY_ID" "$$S3_SECRET_ACCESS_KEY" > /etc/seaweedfs/s3.json
+        exec /entrypoint.sh s3 -filer=seaweedfs-filer:8888 -port=8333 -config=/etc/seaweedfs/s3.json
+    environment:
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-change-me}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-change-me}
     expose:
       - "8333"
-    volumes:
-      - ./docker/seaweedfs/s3.json.example:/etc/seaweedfs/s3.json:ro
     depends_on:
       seaweedfs-filer:
         condition: service_healthy

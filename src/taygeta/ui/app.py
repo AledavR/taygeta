@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -145,6 +146,28 @@ def page_image_bytes(source_path: str | Path, page_index: int, *, dpi: int = 150
 # ---------------------------------------------------------------------------
 
 
+def _slugify(value: str | None) -> str:
+    """Convierte texto libre en un slug válido ``^[a-z0-9_]+$`` (o ``""``).
+
+    - separa las tildes/diacríticos (``Cálculo`` → ``calculo``);
+    - pasa a minúsculas;
+    - sustituye espacios y caracteres especiales por ``_``;
+    - colapsa ``_`` repetidos y recorta los de los extremos.
+    """
+    if value is None:
+        return ""
+    decomposed = unicodedata.normalize("NFKD", str(value))
+    without_marks = "".join(char for char in decomposed if not unicodedata.combining(char))
+    normalized = re.sub(r"[^a-z0-9_]+", "_", without_marks.strip().lower())
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    return normalized
+
+
+def _normalize_slug(value: str | None, default: str = "general") -> str:
+    """Normaliza un slug y devuelve ``default`` cuando queda vacío."""
+    return _slugify(value) or default
+
+
 def build_enriched_question(
     base: QuestionRaw,
     *,
@@ -158,7 +181,11 @@ def build_enriched_question(
     """Compone una :class:`EnrichedQuestion` a partir de los campos revisados.
 
     Los valores editados manualmente prevalecen sobre la transcripción
-    automática, ya que se toman directamente del formulario.
+    automática. ``course``, ``topic`` y ``subtopic`` se normalizan a slugs
+    válidos (``^[a-z0-9_]+$``) para evitar ``ValidationError``; si ``course`` o
+    ``topic`` quedan vacíos se usa ``"general"`` y el ``subtopic`` vacío se
+    convierte en ``None``. Los prerrequisitos se normalizan igual y se descartan
+    los que queden vacíos.
     """
     return EnrichedQuestion(
         id=base.id,
@@ -167,11 +194,11 @@ def build_enriched_question(
         choices=base.choices,
         figures=base.figures,
         notation_notes=base.notation_notes,
-        course=course,
-        topic=topic,
-        subtopic=subtopic or None,
+        course=_normalize_slug(course),
+        topic=_normalize_slug(topic),
+        subtopic=_slugify(subtopic) or None,
         difficulty=difficulty,
-        prerequisites=list(prerequisites),
+        prerequisites=[slug for slug in (_slugify(item) for item in prerequisites) if slug],
         source_metadata=source_metadata or {},
         created_at=utc_now_iso(),
     )
@@ -298,11 +325,33 @@ def _render_reference_image(
             container.image(data, caption=f"Página original {page_index}")
 
 
+def _taxonomy_defaults(staged: StagedQuestion) -> tuple[str | None, int, list[str]]:
+    """Valores por defecto seguros para los selectores de taxonomía.
+
+    El objeto en staging es habitualmente un ``QuestionRaw``, que **no** define
+    ``subtopic``, ``difficulty`` ni ``prerequisites`` (esos campos son exclusivos
+    de ``EnrichedQuestion``). Se accede con ``getattr`` para soportar ambos casos
+    sin lanzar ``AttributeError``; si el objeto ya está enriquecido, se reutilizan
+    sus valores.
+    """
+    base = staged.question
+    subtopic = getattr(base, "subtopic", None)
+    difficulty = getattr(base, "difficulty", 3)
+    prerequisites = getattr(base, "prerequisites", None) or []
+
+    if not isinstance(subtopic, str) or not subtopic:
+        subtopic = None
+    if not isinstance(difficulty, int) or isinstance(difficulty, bool) or not 1 <= difficulty <= 5:
+        difficulty = 3
+    return subtopic, difficulty, list(prerequisites)
+
+
 def _render_taxonomy_controls(
     index: int, database: Database, staged: StagedQuestion
 ) -> tuple[str, str, str | None, int, list[str], list[str]]:
     """Dibuja los selectores de taxonomía y devuelve los valores elegidos."""
-    base = staged.question
+    base_subtopic, base_difficulty, default_prereqs = _taxonomy_defaults(staged)
+
     courses = sorted({course["slug"] for course in database.list_courses()})
     course_choice = st.selectbox("Curso", [*courses, _NEW_COURSE], key=f"course_{index}")
     course = course_choice
@@ -326,8 +375,16 @@ def _render_taxonomy_controls(
         if course
         else set()
     )
+    # Conservar el subtema existente aunque no esté todavía en el catálogo.
+    if base_subtopic and base_subtopic not in subtopics:
+        subtopics = sorted({*subtopics, base_subtopic})
     subtopic_options = [_NO_SUBTOPIC, *subtopics, _NEW_SUBTOPIC]
-    subtopic_choice = st.selectbox("Subtema", subtopic_options, key=f"subtopic_{index}")
+    subtopic_index = (
+        subtopic_options.index(base_subtopic) if base_subtopic in subtopic_options else 0
+    )
+    subtopic_choice = st.selectbox(
+        "Subtema", subtopic_options, index=subtopic_index, key=f"subtopic_{index}"
+    )
     if subtopic_choice == _NEW_SUBTOPIC:
         subtopic: str | None = st.text_input(
             "Slug del nuevo subtema", key=f"new_subtopic_{index}"
@@ -337,10 +394,11 @@ def _render_taxonomy_controls(
     else:
         subtopic = subtopic_choice
 
-    difficulty = st.slider("Dificultad", min_value=1, max_value=5, value=3, key=f"diff_{index}")
+    difficulty = st.slider(
+        "Dificultad", min_value=1, max_value=5, value=base_difficulty, key=f"diff_{index}"
+    )
 
     catalog = sorted({prereq["slug"] for prereq in database.list_prerequisites()})
-    default_prereqs = list(base.prerequisites) if base is not None else []
     prerequisites = st.multiselect(
         "Prerrequisitos", catalog, default=default_prereqs, key=f"prereq_{index}"
     )

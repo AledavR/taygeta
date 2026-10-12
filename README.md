@@ -245,35 +245,29 @@ El servicio `ocr` usa `llama-server` (llama.cpp) con una API **OpenAI-compatible
 y soporte multimodal. **Los pesos no se incluyen en el repositorio ni en la
 imagen**: viven en el volumen persistente `ocr-models`.
 
-1. Descarga un modelo de visión adecuado para documentos científicos, por
-   ejemplo **Qwen2.5-VL-7B-Instruct (GGUF)** con cuantización Q4/Q8, junto con su
-   archivo **`mmproj`** (proyector visual, obligatorio para entrada multimodal).
-2. Colócalos en el volumen `ocr-models` (por defecto en `/models`):
+**Descarga automática desde Hugging Face**: si los pesos no están presentes, el
+entrypoint los descarga al arrancar usando `OCR_MODEL_URL` y `OCR_MMPROJ_URL`. Por
+defecto se usa **Qwen2-VL-7B-Instruct (GGUF, Q4_K_M)** más su **`mmproj`**:
 
-   ```bash
-   # Ejemplo con huggingface-cli; ajusta repo/archivos a tu elección.
-   docker run --rm -v taygeta_ocr-models:/models \
-     ghcr.io/astral-sh/uv:python3.12-bookworm-slim \
-     bash -lc "pip install -q huggingface_hub && \
-       huggingface-cli download <repo> <archivo>.gguf --local-dir /models && \
-       huggingface-cli download <repo> <mmproj>.gguf --local-dir /models"
-   ```
+```dotenv
+OCR_MODEL=Qwen2-VL-7B-Instruct-Q4_K_M
+OCR_MODEL_PATH=/models/Qwen2-VL-7B-Instruct-Q4_K_M.gguf
+OCR_MODEL_URL=https://huggingface.co/bartowski/Qwen2-VL-7B-Instruct-GGUF/resolve/main/Qwen2-VL-7B-Instruct-Q4_K_M.gguf
+OCR_MMPROJ_PATH=/models/mmproj-Qwen2-VL-7B-Instruct-f16.gguf
+OCR_MMPROJ_URL=https://huggingface.co/bartowski/Qwen2-VL-7B-Instruct-GGUF/resolve/main/mmproj-Qwen2-VL-7B-Instruct-f16.gguf
+OCR_CONTEXT_SIZE=8192
+OCR_CONCURRENCY=1
+```
 
-3. Ajusta en `.env`:
-
-   ```dotenv
-   OCR_MODEL=ggml-org/Qwen2.5-VL-7B-Instruct-GGUF:Q4_K_M
-   OCR_MODEL_PATH=/models/<modelo>.gguf
-   OCR_MMPROJ_PATH=/models/<mmproj>.gguf
-   OCR_CONTEXT_SIZE=8192
-   OCR_CONCURRENCY=1
-   ```
-
-   El nombre del volumen puede variar (`<proyecto>_ocr-models`); compruébalo con
-   `docker volume ls`.
-
-Si el contenedor arranca **sin pesos**, el entrypoint falla con un mensaje claro
-en lugar de marcarse saludable.
+- Las descargas van a un fichero `.part` y se renombran al completar (reanudables):
+  una interrupción no deja un fichero a medias.
+- Si el fichero **ya existe** en el volumen, no se vuelve a descargar.
+- También puedes **montar los pesos manualmente** en `ocr-models` (p. ej. con
+  `huggingface-cli`) y ajustar las rutas/URLs en `.env`.
+- Si no hay pesos y no se definen URLs, el entrypoint falla con un mensaje claro
+  en lugar de marcarse saludable.
+- El primer arranque descarga varios GB (modelo + proyector); el nombre del volumen
+  puede variar (`<proyecto>_ocr-models`), compruébalo con `docker volume ls`.
 
 **Verificar que el OCR ve imágenes y transcribe una fórmula:**
 
@@ -347,8 +341,10 @@ ASSET_PUBLIC_BASE_URL=                     # base pública/proxy opcional para l
 ASSET_URL_TTL_SECONDS=300
 ```
 
-- **Credenciales en dos sitios que deben coincidir**: `docker/seaweedfs/s3.json.example`
-  (identidades del gateway S3) y `.env` (`S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY`).
+- **Credenciales de un único origen**: el gateway S3 genera su configuración IAM a
+  partir de `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` del `.env`, de modo que las
+  credenciales de la aplicación y del gateway siempre coinciden. El esquema del
+  fichero IAM queda documentado en `docker/seaweedfs/s3.json.example`.
   Cámbialas antes de cualquier despliegue no local.
 - **Endpoint interno vs público**: los contenedores usan `http://seaweedfs-s3:8333`.
   El navegador nunca debe apuntar a un host interno de Docker; para mostrar figuras

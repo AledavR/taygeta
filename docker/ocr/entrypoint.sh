@@ -1,23 +1,78 @@
 #!/usr/bin/env bash
 # ============================================================================
 # Punto de entrada del servicio OCR local (llama.cpp `llama-server`).
+#
 # Expone una API compatible con OpenAI en OCR_PORT (por defecto 8080) y carga
 # el modelo multimodal (texto + proyector visual `mmproj`) desde el volumen
-# persistente ocr-models. No imprime credenciales.
+# persistente ocr-models.
+#
+# Si los pesos no existen en el volumen, se descargan automáticamente desde
+# Hugging Face usando las URLs OCR_MODEL_URL / OCR_MMPROJ_URL (configurables por
+# entorno). No imprime credenciales.
 # ============================================================================
 set -euo pipefail
 
 MODEL_PATH="${OCR_MODEL_PATH:-/models/model.gguf}"
 MMPROJ_PATH="${OCR_MMPROJ_PATH:-}"
+MODEL_URL="${OCR_MODEL_URL:-}"
+MMPROJ_URL="${OCR_MMPROJ_URL:-}"
 PORT="${OCR_PORT:-8080}"
 CONTEXT="${OCR_CONTEXT_SIZE:-8192}"
 PARALLEL="${OCR_CONCURRENCY:-1}"
 THREADS="${OCR_THREADS:-$(nproc)}"
 
-if [ ! -f "${MODEL_PATH}" ]; then
-  echo "ERROR: no se encontraron pesos del modelo en '${MODEL_PATH}'." >&2
-  echo "Descarga el GGUF en el volumen 'ocr-models' o define OCR_MODEL_PATH." >&2
-  exit 1
+download_file() {
+  # download_file <url> <destino>
+  local url="$1"
+  local dest="$2"
+  local partial="${dest}.part"
+  mkdir -p "$(dirname "${dest}")"
+  echo "Descargando: ${url}"
+  echo "         ->  ${dest}"
+  if command -v curl >/dev/null 2>&1; then
+    local curl_args=(-fL --retry 3 --retry-delay 5 --connect-timeout 30 --progress-bar)
+    # Reanudar una descarga parcial previa si existe.
+    if [ -s "${partial}" ]; then
+      curl_args+=(-C -)
+    fi
+    curl "${curl_args[@]}" -o "${partial}" "${url}"
+  elif command -v wget >/dev/null 2>&1; then
+    if [ -s "${partial}" ]; then
+      wget -c -O "${partial}" "${url}"
+    else
+      wget -O "${partial}" "${url}"
+    fi
+  else
+    echo "ERROR: se requiere 'curl' o 'wget' para descargar los pesos." >&2
+    return 1
+  fi
+  mv -f "${partial}" "${dest}"
+}
+
+ensure_file() {
+  # ensure_file <ruta> <url> <descripcion>
+  local path="$1"
+  local url="$2"
+  local label="$3"
+  if [ -f "${path}" ]; then
+    echo "${label} ya presente en '${path}'; no se descarga."
+    return 0
+  fi
+  if [ -z "${url}" ]; then
+    echo "ERROR: falta ${label} en '${path}' y no se definió su URL." >&2
+    echo "Define OCR_MODEL_URL / OCR_MMPROJ_URL o monta los pesos en el volumen 'ocr-models'." >&2
+    return 1
+  fi
+  download_file "${url}" "${path}"
+  if [ ! -f "${path}" ]; then
+    echo "ERROR: la descarga de ${label} falló ('${url}')." >&2
+    return 1
+  fi
+}
+
+ensure_file "${MODEL_PATH}" "${MODEL_URL}" "el modelo de visión" || exit 1
+if [ -n "${MMPROJ_PATH}" ]; then
+  ensure_file "${MMPROJ_PATH}" "${MMPROJ_URL}" "el proyector visual (mmproj)" || exit 1
 fi
 
 args=(
@@ -30,12 +85,8 @@ args=(
 )
 
 if [ -n "${MMPROJ_PATH}" ]; then
-  if [ ! -f "${MMPROJ_PATH}" ]; then
-    echo "ERROR: no se encontró el proyector visual en '${MMPROJ_PATH}'." >&2
-    exit 1
-  fi
   args+=(--mmproj "${MMPROJ_PATH}")
 fi
 
-echo "Iniciando OCR: modelo=${MODEL_PATH} ctx=${CONTEXT} parallel=${PARALLEL} puerto=${PORT}"
+echo "Iniciando OCR: modelo=${MODEL_PATH} mmproj=${MMPROJ_PATH:-<ninguno>} ctx=${CONTEXT} parallel=${PARALLEL} puerto=${PORT}"
 exec llama-server "${args[@]}"
