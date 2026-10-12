@@ -1,53 +1,30 @@
-"""Taxonomía curricular canónica de Taygeta.
+"""Taxonomía curricular de Taygeta: nombres legibles de curso.
 
-Define la fuente de verdad del dominio curricular:
+Este módulo conserva únicamente los helpers de presentación del dominio
+curricular:
 
-* :data:`PREREQUISITE_ALIASES`: diccionario de *aliasing* de prerrequisitos que
-  mapea variantes de slug hacia su slug canónico único. Se usa para
-  canonicalizar y deduplicar los prerrequisitos de cada pregunta.
-* :data:`CANONICAL_PREREQUISITES`: lista ordenada y estable de los slugs
-  canónicos derivados de :data:`PREREQUISITE_ALIASES`. Se inyecta en los system
-  prompts de estructuración para orientar al LLM hacia el vocabulario cerrado.
 * :data:`COURSE_NAMES`: catálogo de nombres legibles de curso (con tildes y
   mayúsculas de estilo título) asociados a sus slugs.
-* Helpers :func:`canonical_prerequisite`, :func:`canonicalize_prerequisites`,
-  :func:`title_case_spanish` y :func:`format_course_name`.
+* :func:`title_case_spanish` y :func:`format_course_name`.
 
-Ninguno de estos diccionarios almacena soluciones ni respuestas correctas: son
-únicamente vocabulario curricular.
+La canonicalización de ``course``, ``topic``, ``subtopic`` y prerrequisitos es
+100 % dinámica: se lee de la base de datos en vivo (ver
+:meth:`taygeta.server.db.Database.get_live_taxonomy_tree` y
+:meth:`taygeta.server.db.Database.list_prerequisites`) y se inyecta en los system
+prompts de estructuración. No hay diccionarios de alias ni vocabulario cerrado
+hardcodeado.
+
+Ninguno de estos helpers almacena soluciones ni respuestas correctas: son
+únicamente nombres de presentación.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-
 __all__ = [
-    "CANONICAL_PREREQUISITES",
     "COURSE_NAMES",
-    "PREREQUISITE_ALIASES",
-    "canonical_prerequisite",
-    "canonicalize_prerequisites",
     "format_course_name",
     "title_case_spanish",
 ]
-
-#: Alias de prerrequisito → slug canónico. Las variantes que emiten los modelos
-#: OCR/LLM (singular/plural, sinónimos) se resuelven a un único slug estable.
-PREREQUISITE_ALIASES: dict[str, str] = {
-    "sucesion_de_cauchy": "sucesiones_de_cauchy",
-    "espacios_vectoriales": "espacio_vectorial",
-    "subespacio_vectorial": "subespacios_vectoriales",
-    "metricas": "metrica",
-    "espacio_vectorial_normado": "espacios_normados",
-    "espacios_vectoriales_normados": "espacios_normados",
-    "espacio_de_sucesiones_acotadas": "sucesiones_acotadas",
-    "derivadas": "derivada",
-    "funciones_continuas": "continuidad",
-}
-
-#: Slugs canónicos únicos (valores de :data:`PREREQUISITE_ALIASES`) en orden
-#: estable de primera aparición.
-CANONICAL_PREREQUISITES: tuple[str, ...] = tuple(dict.fromkeys(PREREQUISITE_ALIASES.values()))
 
 #: Palabras menores que, en un Title Case adaptado al español, se escriben en
 #: minúscula salvo que encabecen el título.
@@ -94,25 +71,6 @@ COURSE_NAMES: dict[str, str] = {
     "estadistica": "Estadística",
     "variable_compleja": "Variable Compleja",
 }
-
-
-def canonical_prerequisite(slug: str) -> str:
-    """Devuelve el slug canónico de un prerrequisito, o el propio si no tiene alias."""
-    return PREREQUISITE_ALIASES.get(slug, slug)
-
-
-def canonicalize_prerequisites(slugs: Iterable[str]) -> list[str]:
-    """Canonicaliza y deduplica una lista de prerrequisitos preservando el orden.
-
-    Cada slug se resuelve contra :data:`PREREQUISITE_ALIASES`; los duplicados
-    resultantes y los vacíos se descartan.
-    """
-    result: list[str] = []
-    for slug in slugs:
-        canonical = PREREQUISITE_ALIASES.get(slug, slug)
-        if canonical and canonical not in result:
-            result.append(canonical)
-    return result
 
 
 def title_case_spanish(slug: str) -> str:
