@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import subprocess
 import uuid
 import zipfile
 from collections.abc import Mapping, Sequence
@@ -32,6 +33,7 @@ from taygeta.core import transpiler
 from taygeta.core.schema import EnrichedQuestion, FigureReference
 from taygeta.core.settings import Settings, get_settings
 from taygeta.core.urls import split_asset_reference
+from taygeta.domain.taxonomy import format_course_name
 from taygeta.server.db import Database
 from taygeta.server.object_storage import ObjectStorage
 
@@ -247,21 +249,58 @@ class ExamGenerator:
         if title:
             resolved_title = title
         elif course:
-            resolved_title = f"Examen de práctica — {course}"
+            course_name = self.database.get_course_name(course) or format_course_name(course)
+            resolved_title = f"Examen de práctica — {course_name}"
         else:
             resolved_title = "Examen de práctica"
-        typst = self.build_exam_typst(questions, title=resolved_title, figure_paths=figure_paths)
-        (source_dir / "main.typ").write_text(typst)
-        manifest = {
-            "exam_id": identifier,
-            "title": resolved_title,
-            "figure_paths": figure_paths,
-            "questions": [question.model_dump(mode="json") for question in questions],
-        }
-        (source_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False))
-
-        compile_result = transpiler.compile_typst(typst, source_dir, output_name="output.pdf")
+        try:
+            typst = self.build_exam_typst(
+                questions, title=resolved_title, figure_paths=figure_paths
+            )
+            (source_dir / "main.typ").write_text(typst)
+            manifest = {
+                "exam_id": identifier,
+                "title": resolved_title,
+                "figure_paths": figure_paths,
+                "questions": [question.model_dump(mode="json") for question in questions],
+            }
+            (source_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False))
+            compile_result = transpiler.compile_typst(typst, source_dir, output_name="output.pdf")
+        except transpiler.TranspileError as exc:
+            logger.error(
+                "Error de conversión Markdown/TeX→Typst del examen %s: %s%s",
+                identifier,
+                exc.message,
+                f" (fórmula original: {exc.original!r})" if exc.original else "",
+            )
+            return ExamResult(
+                identifier,
+                "error",
+                len(questions),
+                None,
+                None,
+                [f"Error de conversión a Typst: {exc.message}"],
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            logger.error(
+                "No se pudo ejecutar pandoc/typst al generar el examen %s: %s",
+                identifier,
+                exc,
+            )
+            return ExamResult(
+                identifier,
+                "error",
+                len(questions),
+                None,
+                None,
+                [f"Error de compilación Typst: {exc}"],
+            )
         if not compile_result.ok:
+            logger.error(
+                "Typst rechazó la fuente del examen %s:\n%s",
+                identifier,
+                compile_result.format_errors(),
+            )
             return ExamResult(
                 identifier,
                 "error",

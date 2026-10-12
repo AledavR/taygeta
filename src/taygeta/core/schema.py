@@ -56,6 +56,7 @@ __all__ = [
     "new_question_id",
     "normalize_slug",
     "sanitize_math_delimiters",
+    "sanitize_norm_bars",
     "slugify",
     "utc_now_iso",
 ]
@@ -133,6 +134,34 @@ def sanitize_math_delimiters(text: str) -> str:
     sanitized = _DISPLAY_MATH_RE.sub(lambda match: f"$${match.group(1)}$$", text)
     sanitized = _INLINE_MATH_RE.sub(lambda match: f"${match.group(1)}$", sanitized)
     return sanitized
+
+
+def sanitize_norm_bars(text: str) -> str:
+    """Reescribe las barras de norma LaTeX ``\\|`` como ``||`` (norma Typst).
+
+    ``\\|`` es la barra de norma en LaTeX y ``||`` su equivalente en Typst; el
+    transpilador no reconoce el comando ``\\|`` y fallaría al compilar. Esta
+    función sustituye cada ``\\|`` que no esté precedida por otra barra invertida
+    (es decir, que no forme parte de un ``\\\\|``, donde ``\\\\`` es un salto de
+    línea) por ``||``. Se usa un escaneo manual, sin expresiones regulares.
+    """
+    parts: list[str] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if (
+            char == "\\"
+            and index + 1 < length
+            and text[index + 1] == "|"
+            and (index == 0 or text[index - 1] != "\\")
+        ):
+            parts.append("||")
+            index += 2
+            continue
+        parts.append(char)
+        index += 1
+    return "".join(parts)
 
 
 def is_relative_asset_path(value: str | None) -> bool:

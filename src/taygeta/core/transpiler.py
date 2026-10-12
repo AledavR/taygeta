@@ -31,6 +31,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from taygeta.core.schema import sanitize_math_delimiters, sanitize_norm_bars
+
 __all__ = [
     "CompileResult",
     "MathConverter",
@@ -39,6 +41,7 @@ __all__ = [
     "markdown_to_latex",
     "markdown_to_typst",
     "pandoc_to_ast",
+    "sanitize_math_for_typst",
     "validate_typst",
 ]
 
@@ -249,7 +252,6 @@ _OPERATORS = {
 #: Comandos de estilo/ornamento que aplican a un único grupo.
 _STYLE = {
     "mathrm": "upright",
-    "text": "upright",
     "mathbf": "bold",
     "boldsymbol": "bold",
     "mathit": "italic",
@@ -284,6 +286,51 @@ _MATRIX_ENVS = {
 
 _FRACTIONS = frozenset({"frac", "dfrac", "tfrac", "cfrac"})
 
+#: Comandos de "modo texto" dentro de matemáticas. Su argumento es texto literal
+#: (con espacios) y debe convertirse en una cadena Typst ``"..."``, nunca en un
+#: identificador: ``\text{ si }`` → ``upright(" si ")``, jamás ``upright(si)``.
+_TEXT_COMMANDS = frozenset({"text", "textrm", "textnormal", "textup", "mbox"})
+
+
+def _quote_typst_string(text: str) -> str:
+    """Entrecomilla ``text`` como literal de cadena Typst, escapando ``"`` y ``\\``.
+
+    El contenido de ``\text{...}`` es texto literal; Typst lo interpreta como
+    cadena (``upright(" si ")``) en lugar de como variables (``upright(si)``).
+    """
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _scan_text_argument(tex: str, index: int) -> tuple[tuple[str, str], int] | None:
+    """Captura el argumento literal ``{...}`` de un comando de modo texto.
+
+    Devuelve el token ``("text", contenido_crudo)`` y el índice tras la llave de
+    cierre, conservando los espacios interiores intactos. Si el comando no va
+    seguido de un grupo ``{...}`` bien formado devuelve ``None``, en cuyo caso se
+    tratará como un comando normal.
+    """
+    length = len(tex)
+    cursor = index
+    while cursor < length and tex[cursor] in " \t\r\n":
+        cursor += 1
+    if cursor >= length or tex[cursor] != "{":
+        return None
+    depth = 1
+    start = cursor + 1
+    scan = start
+    while scan < length and depth > 0:
+        if tex[scan] == "{":
+            depth += 1
+        elif tex[scan] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        scan += 1
+    if depth != 0:
+        return None
+    return ("text", tex[start:scan]), scan + 1
+
 
 def _tokenize_tex(tex: str) -> list[tuple[str, str]]:
     """Convierte TeX matemático en una lista de tokens ``(tipo, valor)``."""
@@ -306,7 +353,14 @@ def _tokenize_tex(tex: str) -> list[tuple[str, str]]:
                     end = index + 1
                     while end < length and tex[end].isalpha():
                         end += 1
-                    tokens.append(("cmd", tex[index + 1 : end]))
+                    name = tex[index + 1 : end]
+                    if name in _TEXT_COMMANDS:
+                        text_argument = _scan_text_argument(tex, end)
+                        if text_argument is not None:
+                            text_token, index = text_argument
+                            tokens.append(text_token)
+                            continue
+                    tokens.append(("cmd", name))
                     index = end
                 else:
                     tokens.append(("cmd", following))
@@ -415,6 +469,8 @@ class MathConverter:
             return self._parse_command(tokens, index)
         if kind == "char":
             return value, index + 1
+        if kind == "text":
+            return f"upright({_quote_typst_string(value)})", index + 1
         raise TranspileError(f"token no esperado {tokens[index]!r}", original=self._original)
 
     def _parse_group(self, tokens: list[tuple[str, str]], index: int, *, sep: bool = True):
@@ -746,6 +802,24 @@ def _render_blocks(
 # ---------------------------------------------------------------------------
 
 
+def sanitize_math_for_typst(markdown: str) -> str:
+    """Sanitiza el Markdown de entrada justo antes de compilar a Typst.
+
+    Endurecimiento defensivo del compilador: aunque los esquemas ya normalizan
+    los delimitadores al validar (y la base de datos almacena la forma canónica),
+    este paso garantiza que cualquier enunciado que llegue al transpilador quede
+    listo para Typst:
+
+    * ``\\[...\\]`` y ``\\(...\\)`` se reescriben a ``$$...$$`` / ``$...$`` (con
+      :func:`~taygeta.core.schema.sanitize_math_delimiters`), de modo que Pandoc
+      genere nodos ``DisplayMath``/``InlineMath`` y el renderizado produzca los
+      delimitadores de bloque ``$ ... $`` de Typst;
+    * ``\\|`` (barra de norma LaTeX) se reescribe como ``||`` (norma Typst) con
+      :func:`~taygeta.core.schema.sanitize_norm_bars`.
+    """
+    return sanitize_norm_bars(sanitize_math_delimiters(markdown))
+
+
 def markdown_to_typst(
     markdown: str,
     *,
@@ -762,7 +836,8 @@ def markdown_to_typst(
     Raises:
         TranspileError: si hay un bloque/inline/constructo no soportado.
     """
-    ast = pandoc_to_ast(markdown, pandoc_bin=pandoc_bin)
+    sanitized = sanitize_math_for_typst(markdown)
+    ast = pandoc_to_ast(sanitized, pandoc_bin=pandoc_bin)
     converter = MathConverter()
     return _render_blocks(ast.get("blocks", []), converter, figure_paths or {}) + "\n"
 
