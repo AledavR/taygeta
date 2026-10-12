@@ -464,6 +464,12 @@ class Database:
                 (slug, name),
             )
 
+    def get_course_name(self, slug: str) -> str | None:
+        """Devuelve el nombre legible de un curso, o ``None`` si no está catalogado."""
+        with self.connect() as connection:
+            row = connection.execute("SELECT name FROM courses WHERE slug = ?", (slug,)).fetchone()
+        return row["name"] if row else None
+
     def upsert_topic(
         self,
         course_slug: str,
@@ -545,6 +551,31 @@ class Database:
             "topics": self.list_topics(),
             "prerequisites": self.list_prerequisites(),
         }
+
+    def get_live_taxonomy_tree(self) -> dict[str, dict[str, list[str]]]:
+        """Devuelve la taxonomía curricular viva de la base de datos.
+
+        Reconstruye la jerarquía ``curso -> tema -> subtemas`` realmente en uso a
+        partir de las preguntas ya confirmadas. Solo se incluyen cursos y temas
+        presentes en la tabla ``questions``, de modo que el LLM pueda reutilizar
+        los slugs existentes en lugar de inventar variantes. El diccionario no
+        almacena soluciones ni respuestas correctas: únicamente slugs curriculares.
+        """
+        tree: dict[str, dict[str, list[str]]] = {}
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT course, topic, subtopic FROM questions "
+                "WHERE course IS NOT NULL ORDER BY course, topic, subtopic"
+            ).fetchall()
+        for row in rows:
+            course = row["course"]
+            topic = row["topic"]
+            subtopic = row["subtopic"]
+            topics = tree.setdefault(course, {})
+            subtopics = topics.setdefault(topic, [])
+            if subtopic and subtopic not in subtopics:
+                subtopics.append(subtopic)
+        return tree
 
     # -- Staging ------------------------------------------------------------
     def create_staging_session(

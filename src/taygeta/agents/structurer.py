@@ -49,6 +49,63 @@ __all__ = ["QuestionDraft", "StructuredQuestion", "Structurer", "StructuringErro
 
 _PLACEHOLDER_RE = re.compile(PLACEHOLDER_PATTERN)
 
+
+def _build_dynamic_curriculum_prompt(
+    taxonomy_tree: dict[str, dict[str, list[str]]],
+) -> str:
+    """Formatea la taxonomía curricular viva como texto de grounding para el LLM.
+
+    Recibe el árbol ``curso -> tema -> subtemas`` reconstruido desde la base de
+    datos y lo convierte en un catálogo legible que el LLM debe reutilizar de
+    forma estricta para canonicalizar ``course``, ``topic`` y ``subtopic``.
+    """
+    header = (
+        "CATÁLOGO DE CURSOS Y TEMAS QUE YA EXISTEN EN LA BASE DE DATOS:\n"
+        "Aquí tienes el catálogo de cursos y temas que YA EXISTEN en la base de datos. "
+        "Si el contenido de la pregunta corresponde a uno de estos, DEBES usar el slug "
+        "exacto listado. Solo inventa un slug nuevo si la materia o tema es genuinamente "
+        "nuevo y no existe en el catálogo."
+    )
+    if not taxonomy_tree:
+        return (
+            header + "\n(El catálogo está vacío: aún no hay cursos ni temas confirmados en la "
+            "base de datos; puedes proponer slugs nuevos en snake_case.)"
+        )
+    lines: list[str] = [header]
+    for course in sorted(taxonomy_tree):
+        topics = taxonomy_tree[course]
+        topic_desc = ", ".join(f"`{topic}`" for topic in sorted(topics))
+        lines.append(f"- Curso: `{course}` -> Temas: {topic_desc}")
+        for topic in sorted(topics):
+            subtopics = sorted(topics[topic])
+            if subtopics:
+                subtopic_desc = ", ".join(f"`{subtopic}`" for subtopic in subtopics)
+                lines.append(f"    - `{course}` / `{topic}` -> Subtemas: {subtopic_desc}")
+    return "\n".join(lines)
+
+
+def _build_dynamic_prerequisites_prompt(prerequisites: list[str]) -> str:
+    """Formatea el catálogo vivo de prerrequisitos como texto de grounding.
+
+    Los slugs provienen de la base de datos (tabla ``prerequisites``), de modo
+    que el LLM reutilice el vocabulario ya existente antes de acuñar conceptos
+    nuevos. Si el catálogo está vacío, lo indica explícitamente.
+    """
+    header = (
+        "CATÁLOGO DE PRERREQUISITOS QUE YA EXISTEN EN LA BASE DE DATOS:\n"
+        "Reutiliza estos slugs exactos cuando un concepto previo del ejercicio sea "
+        "equivalente o afín a uno de ellos (ignorando singular/plural, artículos o "
+        "sinónimos matemáticos comunes)."
+    )
+    if not prerequisites:
+        return (
+            header + "\n(El catálogo está vacío: aún no hay prerrequisitos confirmados en la "
+            "base de datos; puedes proponer slugs nuevos en snake_case.)"
+        )
+    formatted_slugs = "\n".join(f"- `{slug}`" for slug in sorted(set(prerequisites)))
+    return header + "\n" + formatted_slugs
+
+
 _STRUCTURING_SYSTEM_PROMPT = """Eres un estructurador de preguntas de exámenes \
 científicos. A partir del texto transcrito por OCR, devuelve UNA lista de \
 preguntas y, en la MISMA respuesta, infiere para cada una tanto el enunciado \
@@ -65,11 +122,26 @@ true_false o numerical.
 3. choices: alternativas (mínimo 2 para multiple_choice).
 4. notation_notes: incertidumbres de lectura; no las resuelvas inventando texto.
 5. course: slug del curso en snake_case (minúsculas, dígitos y guion bajo; sin \
-espacios ni tildes).
-6. topic: slug del tema dentro del curso (snake_case).
-7. subtopic: slug del subtema (snake_case) o null si no aplica.
+espacios ni tildes). DEBES reutilizar el slug exacto del catálogo de cursos y \
+temas adjunto abajo si la materia corresponde a un curso ya existente; solo \
+inventa un slug nuevo si la materia es genuinamente nueva y no aparece en el \
+catálogo.
+6. topic: slug del tema dentro del curso (snake_case), reutilizando el slug \
+exacto del catálogo adjunto si el tema ya existe.
+7. subtopic: slug del subtema (snake_case) o null si no aplica; reutiliza el \
+slug exacto del catálogo si el subtema ya existe.
 8. difficulty: entero 1-5 según la COMPLEJIDAD MATEMÁTICA; NO lo fijes en 3.
-9. prerequisites: lista de conceptos previos como slugs snake_case.
+9. prerequisites: lista de conceptos matemáticos previos en snake_case. Para \
+cada concepto identificado:
+   a. MAPEO DINÁMICO OBLIGATORIO: Compara semánticamente el concepto contra el \
+catálogo de prerrequisitos adjunto abajo (leído de la base de datos). Si el \
+concepto equivale a un término existente (ignorando número singular/plural, \
+sinónimos matemáticos o leves diferencias de redacción), DEBES usar exactamente \
+el slug del catálogo.
+   b. DEDUPLICACIÓN: No devuelvas slugs duplicados ni redundantes.
+   c. NUEVOS CONCEPTOS: Solo si el concepto matemático no tiene ninguna \
+equivalencia en el catálogo, acuña un nuevo slug conciso en snake_case \
+(preferentemente en singular, sin artículos innecesarios).
 
 No resuelvas el ejercicio, no añadas soluciones ni respuestas correctas y no \
 inventes datos que no se deduzcan del enunciado.
@@ -92,11 +164,26 @@ true_false o numerical.
 3. choices: alternativas corregidas (mínimo 2 para multiple_choice).
 4. notation_notes: incertidumbres de lectura; no las resuelvas inventando texto.
 5. course: slug del curso en snake_case (minúsculas, dígitos y guion bajo; sin \
-espacios ni tildes), re-inferido del nuevo contexto.
-6. topic: slug del tema dentro del curso (snake_case).
-7. subtopic: slug del subtema (snake_case) o null si no aplica.
+espacios ni tildes), re-inferido del nuevo contexto. DEBES reutilizar el slug \
+exacto del catálogo de cursos y temas adjunto abajo si la materia corresponde a \
+un curso ya existente; solo inventa un slug nuevo si la materia es genuinamente \
+nueva y no aparece en el catálogo.
+6. topic: slug del tema dentro del curso (snake_case), reutilizando el slug \
+exacto del catálogo adjunto si el tema ya existe.
+7. subtopic: slug del subtema (snake_case) o null si no aplica; reutiliza el \
+slug exacto del catálogo si el subtema ya existe.
 8. difficulty: entero 1-5 según la COMPLEJIDAD MATEMÁTICA; NO lo fijes en 3.
-9. prerequisites: lista de conceptos previos como slugs snake_case.
+9. prerequisites: lista de conceptos previos como slugs snake_case. Para cada \
+concepto identificado:
+   a. MAPEO DINÁMICO OBLIGATORIO: Compara semánticamente el concepto contra el \
+catálogo de prerrequisitos adjunto abajo (leído de la base de datos). Si el \
+concepto equivale a un término existente (ignorando número singular/plural, \
+sinónimos matemáticos o leves diferencias de redacción), DEBES usar exactamente \
+el slug del catálogo.
+   b. DEDUPLICACIÓN: No devuelvas slugs duplicados ni redundantes.
+   c. NUEVOS CONCEPTOS: Solo si el concepto matemático no tiene ninguna \
+equivalencia en el catálogo, acuña un nuevo slug conciso en snake_case \
+(preferentemente en singular, sin artículos innecesarios).
 
 No resuelvas el ejercicio, no añadas soluciones ni respuestas correctas y no \
 inventes datos que no se deduzcan del enunciado.
@@ -182,6 +269,7 @@ class Structurer:
         client: Any | None = None,
         model: str | None = None,
         max_retries: int | None = None,
+        database: Any | None = None,
     ) -> None:
         """Crea el estructurador.
 
@@ -189,10 +277,15 @@ class Structurer:
             settings: Configuración a usar; por defecto la global.
             client: Cliente ``instructor`` ya construido (inyectable en pruebas).
             model: Sobrescribe ``LLM_MODEL``.
+            database: Acceso a la base de datos para leer la taxonomía viva
+                (curso/tema/subtema y prerrequisitos) y ensamblar el prompt de
+                grounding dinámico. Inyectable en pruebas; si es ``None``, el
+                prompt se construye sin catálogo (base de datos vacía).
         """
         self.settings = settings or get_settings()
         self._client = client
         self._model = model
+        self.database = database
         self._max_retries = (
             max_retries if max_retries is not None else self.settings.LLM_MAX_RETRIES
         )
@@ -217,6 +310,46 @@ class Structurer:
             max_retries=self._max_retries,
         )
 
+    def _live_taxonomy_tree(self) -> dict[str, dict[str, list[str]]]:
+        """Lee la taxonomía curricular viva de la base de datos, o ``{}`` si no hay."""
+        if self.database is None or not hasattr(self.database, "get_live_taxonomy_tree"):
+            return {}
+        try:
+            return self.database.get_live_taxonomy_tree()
+        except Exception:  # noqa: BLE001 - el grounding es opcional, nunca bloquea
+            logger.warning("no se pudo leer la taxonomía viva de la base de datos", exc_info=True)
+            return {}
+
+    def _live_prerequisites(self) -> list[str]:
+        """Lee el catálogo vivo de prerrequisitos de la base de datos, o ``[]`` si no hay."""
+        if self.database is None or not hasattr(self.database, "list_prerequisites"):
+            return []
+        try:
+            rows = self.database.list_prerequisites()
+        except Exception:  # noqa: BLE001 - el grounding es opcional, nunca bloquea
+            logger.warning(
+                "no se pudo leer el catálogo de prerrequisitos de la base de datos",
+                exc_info=True,
+            )
+            return []
+        return [str(row["slug"]) for row in rows if row.get("slug")]
+
+    def _build_system_prompt(self, *, refining: bool) -> str:
+        """Ensambla el system prompt dinámicamente con la taxonomía viva de la BD.
+
+        Parte de las reglas estáticas de formato y les adjunta el catálogo de
+        cursos/temas/subtemas y de prerrequisitos leídos en vivo, de modo que el
+        LLM reutilice los slugs ya existentes en lugar de inventar variantes.
+        """
+        rules = _REFINING_SYSTEM_PROMPT if refining else _STRUCTURING_SYSTEM_PROMPT
+        return (
+            rules
+            + "\n\n"
+            + _build_dynamic_curriculum_prompt(self._live_taxonomy_tree())
+            + "\n\n"
+            + _build_dynamic_prerequisites_prompt(self._live_prerequisites())
+        )
+
     def structure(
         self,
         intermediate: TranscriptionIntermediate,
@@ -238,7 +371,7 @@ class Structurer:
             raise StructuringError("no hay texto transcrito que estructurar")
 
         messages = [
-            {"role": "system", "content": _STRUCTURING_SYSTEM_PROMPT},
+            {"role": "system", "content": self._build_system_prompt(refining=False)},
             {"role": "user", "content": self._build_user_message(intermediate, hints)},
         ]
         try:
@@ -282,7 +415,7 @@ class Structurer:
             StructuringError: si el proveedor falla o no devuelve una pregunta.
         """
         messages = [
-            {"role": "system", "content": _REFINING_SYSTEM_PROMPT},
+            {"role": "system", "content": self._build_system_prompt(refining=True)},
             {
                 "role": "user",
                 "content": self._build_refine_user_message(intermediate, current, hints),

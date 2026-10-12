@@ -134,15 +134,17 @@ class IngestPipeline:
         construyen a partir de la configuración global.
         """
         self.settings = settings or get_settings()
+        self.database = database
         self.ocr = ocr if ocr is not None else OCRClient(self.settings)
-        self.structurer = structurer if structurer is not None else Structurer(self.settings)
+        self.structurer = (
+            structurer if structurer is not None else Structurer(self.settings, database=database)
+        )
         self.semantic = (
             semantic_validator
             if semantic_validator is not None
             else SemanticValidator(self.settings)
         )
         self.storage = storage
-        self.database = database
 
     def ingest(
         self,

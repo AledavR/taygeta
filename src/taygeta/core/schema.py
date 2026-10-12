@@ -444,7 +444,7 @@ class EnrichedQuestion(QuestionRaw):
     )
     prerequisites: list[Slug] = Field(
         default_factory=list,
-        description="Slugs canónicos de los prerrequisitos.",
+        description="Slugs de los prerrequisitos (formato ^[a-z0-9_]+$).",
     )
     source_metadata: dict[str, Any] = Field(
         default_factory=dict,
@@ -476,6 +476,33 @@ class EnrichedQuestion(QuestionRaw):
                 f"created_at debe ser una fecha/hora ISO 8601 válida (recibido {value!r})"
             ) from exc
         return value
+
+    @field_validator("prerequisites", mode="before")
+    @classmethod
+    def _normalize_prerequisites(cls, value: Any) -> list[str]:
+        """Normaliza y deduplica los prerrequisitos antes de validarlos.
+
+        Tolera una cadena suelta (separada por comas o punto y coma) y aplica
+        ``slugify`` a cada elemento, descartando vacíos y duplicados. La
+        canonicalización semántica (reutilización de slugs ya existentes en la
+        base de datos) la realiza el LLM durante la estructuración mediante el
+        catálogo dinámico inyectado en el prompt; aquí solo se garantiza el
+        formato básico ``^[a-z0-9_]+$`` impuesto por :data:`Slug`.
+        """
+        if value is None:
+            return []
+        if isinstance(value, str):
+            value = value.replace(";", ",").split(",")
+        if not isinstance(value, (list, tuple, set)):
+            return []
+        result: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            slug = slugify(item)
+            if slug and slug not in result:
+                result.append(slug)
+        return result
 
 
 # ---------------------------------------------------------------------------
