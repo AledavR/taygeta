@@ -1,0 +1,385 @@
+"""Esquemas Pydantic v2 canónicos del proyecto Taygeta.
+
+Este módulo define los modelos de datos empleados por la ingesta híbrida, la
+clasificación curricular y el almacenamiento de preguntas.
+
+Reglas transversales:
+
+* ``extra="forbid"`` en todos los modelos: cualquier campo no declarado, en
+  particular cualquier intento de añadir soluciones, claves de respuesta o
+  respuestas correctas, provoca un error de validación.
+* Los slugs curriculares (``course``, ``topic``, ``subtopic`` y prerrequisitos)
+  se validan con la expresión regular ``^[a-z0-9_]+$`` (sin espacios).
+* Los enunciados usan Markdown con matemáticas TeX ``$...$`` y ``$$...$$`` y
+  placeholders de figura ``{{fig:N}}``.
+
+NOTA CRÍTICA: Ningún modelo admite ni almacena soluciones, claves de respuestas,
+respuestas correctas ni razonamientos que resuelvan el ejercicio. La extracción
+transcribe únicamente el contenido visible.
+"""
+
+from __future__ import annotations
+
+import re
+import uuid
+from datetime import UTC, datetime
+from typing import Annotated, Any, Literal
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
+
+__all__ = [
+    "CURRICULAR_SLUG_PATTERN",
+    "ILLEGIBLE_MARKER",
+    "PLACEHOLDER_PATTERN",
+    "Choice",
+    "EnrichedQuestion",
+    "FigureReference",
+    "QuestionRaw",
+    "Slug",
+    "TranscriptionIntermediate",
+    "deterministic_question_id",
+    "new_question_id",
+    "utc_now_iso",
+]
+
+
+# ---------------------------------------------------------------------------
+# Constantes y tipos auxiliares
+# ---------------------------------------------------------------------------
+
+#: Expresión regular de slugs curriculares: minúsculas, dígitos y guion bajo.
+CURRICULAR_SLUG_PATTERN = r"^[a-z0-9_]+$"
+
+#: Convención explícita para marcar fragmentos ilegibles durante el OCR.
+ILLEGIBLE_MARKER = "[ILEGIBLE]"
+
+#: Placeholders que intercalan figuras dentro del enunciado, p. ej. ``{{fig:1}}``.
+PLACEHOLDER_PATTERN = r"\{\{fig:(\d+)\}\}"
+
+_PLACEHOLDER_RE = re.compile(PLACEHOLDER_PATTERN)
+_FIGURE_ID_PATTERN = r"^fig:\d+$"
+
+#: Slug curricular validado (minúsculas, dígitos y guion bajo, sin espacios).
+Slug = Annotated[
+    str,
+    StringConstraints(pattern=CURRICULAR_SLUG_PATTERN, strip_whitespace=False),
+]
+
+#: Namespace estable para UUID5 deterministas de preguntas.
+_QUESTION_ID_NAMESPACE = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
+
+
+def new_question_id() -> str:
+    """Genera un UUID aleatorio (versión 4) como identificador de pregunta."""
+    return str(uuid.uuid4())
+
+
+def deterministic_question_id(*parts: str) -> str:
+    """Genera un UUID5 determinista a partir de las partes indicadas.
+
+    Permite que una misma pregunta obtenga siempre el mismo identificador
+    mientras su contenido de origen no cambie.
+    """
+    if not parts:
+        raise ValueError("se requiere al menos una parte para el UUID determinista")
+    return str(uuid.uuid5(_QUESTION_ID_NAMESPACE, "|".join(parts)))
+
+
+def utc_now_iso() -> str:
+    """Devuelve la fecha/hora actual en ISO 8601 con zona horaria UTC."""
+    return datetime.now(tz=UTC).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# 3.1. FigureReference
+# ---------------------------------------------------------------------------
+
+
+class FigureReference(BaseModel):
+    """Referencia geométrica a una figura extraída de un documento.
+
+    ``bbox`` usa el formato ``[ymin, xmin, ymax, xmax]`` con coordenadas
+    normalizadas en el rango ``0-1000``. ``asset_path`` es un identificador
+    estable de objeto (``s3://bucket/key`` o una clave relativa al bucket);
+    nunca una ruta local absoluta como ``/app/assets/...``.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    id: str = Field(
+        ...,
+        pattern=_FIGURE_ID_PATTERN,
+        description='Identificador estable de la figura, por ejemplo "fig:1".',
+    )
+    page: int = Field(
+        ...,
+        ge=0,
+        description="Índice físico de la página basado en cero.",
+    )
+    bbox: list[int] = Field(
+        ...,
+        min_length=4,
+        max_length=4,
+        description="Bounding box [ymin, xmin, ymax, xmax] normalizado a 0-1000.",
+    )
+    caption: str | None = Field(
+        default=None,
+        description="Pie de figura visible, si existe.",
+    )
+    asset_path: str | None = Field(
+        default=None,
+        description=(
+            "Identificador de objeto estable (s3://bucket/key o clave relativa). "
+            "Nunca una ruta local absoluta."
+        ),
+    )
+
+    @field_validator("bbox")
+    @classmethod
+    def _validate_bbox(cls, value: list[int]) -> list[int]:
+        ymin, xmin, ymax, xmax = value
+        if any(coord < 0 or coord > 1000 for coord in value):
+            raise ValueError("bbox debe tener coordenadas normalizadas entre 0 y 1000")
+        if ymin >= ymax or xmin >= xmax:
+            raise ValueError(
+                "bbox debe cumplir ymin < ymax y xmin < xmax "
+                f"(recibido [ymin={ymin}, xmin={xmin}, ymax={ymax}, xmax={xmax}])"
+            )
+        return value
+
+    @field_validator("asset_path")
+    @classmethod
+    def _validate_asset_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        if value.startswith("/") or value.startswith("file://"):
+            raise ValueError(
+                "asset_path no puede ser una ruta local absoluta; usa una URI "
+                "s3://bucket/key o una clave de objeto relativa al bucket"
+            )
+        if re.match(r"^[a-zA-Z]:[\\/]", value):
+            raise ValueError(
+                "asset_path no puede ser una ruta local absoluta de Windows; usa una "
+                "URI s3://bucket/key o una clave de objeto relativa al bucket"
+            )
+        return value
+
+
+# ---------------------------------------------------------------------------
+# 3.2. Choice
+# ---------------------------------------------------------------------------
+
+
+class Choice(BaseModel):
+    """Alternativa de una pregunta de opción múltiple."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(
+        ...,
+        min_length=1,
+        pattern=r"^[A-Za-z0-9]+$",
+        description='Identificador de la alternativa, por ejemplo "A", "B", "C" o "D".',
+    )
+    content_raw: str = Field(
+        ...,
+        min_length=1,
+        description="Contenido Markdown de la alternativa con expresiones matemáticas TeX.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# 3.3. QuestionRaw
+# ---------------------------------------------------------------------------
+
+
+class QuestionRaw(BaseModel):
+    """Pregunta transcrita y estructurada, sin solución ni respuesta correcta.
+
+    El enunciado usa Markdown con ``$...$`` y ``$$...$$`` para matemáticas y
+    placeholders ``{{fig:N}}`` para intercalar figuras en el punto exacto del
+    flujo de lectura. Los placeholders y las figuras declaradas deben coincidir
+    uno a uno.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(
+        ...,
+        description="UUID determinista o generado que identifica la pregunta.",
+    )
+    statement_raw: str = Field(
+        ...,
+        min_length=1,
+        description=(
+            "Enunciado en Markdown con matemáticas $...$ / $$...$$ y placeholders "
+            "{{fig:N}} para figuras."
+        ),
+    )
+    question_type: Literal["multiple_choice", "open_ended", "true_false", "numerical"] = Field(
+        ...,
+        description="Tipo de pregunta según su formato visible.",
+    )
+    choices: list[Choice] | None = Field(
+        default=None,
+        description="Alternativas; obligatorias (>= 2) para multiple_choice.",
+    )
+    figures: list[FigureReference] = Field(
+        default_factory=list,
+        description="Figuras referenciadas por el enunciado mediante {{fig:N}}.",
+    )
+    notation_notes: list[str] = Field(
+        default_factory=list,
+        description="Notas sobre ambigüedades o incertidumbres de notación detectadas.",
+    )
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str) -> str:
+        try:
+            uuid.UUID(value)
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise ValueError("id debe ser un UUID válido") from exc
+        return value
+
+    @model_validator(mode="after")
+    def _validate_structure(self) -> QuestionRaw:
+        figure_ids = [figure.id for figure in self.figures]
+        if len(figure_ids) != len(set(figure_ids)):
+            raise ValueError("los identificadores de figuras deben ser únicos")
+
+        declared = set(figure_ids)
+        referenced = {f"fig:{match}" for match in _PLACEHOLDER_RE.findall(self.statement_raw)}
+        missing = sorted(referenced - declared)
+        unused = sorted(declared - referenced)
+        if missing:
+            raise ValueError(
+                "el enunciado referencia placeholders sin figura declarada: " + ", ".join(missing)
+            )
+        if unused:
+            raise ValueError(
+                "hay figuras declaradas sin placeholder en el enunciado: " + ", ".join(unused)
+            )
+
+        if self.question_type == "multiple_choice":
+            choices = self.choices or []
+            if len(choices) < 2:
+                raise ValueError(
+                    "las preguntas multiple_choice requieren al menos dos alternativas"
+                )
+        if self.choices is not None:
+            choice_ids = [choice.id for choice in self.choices]
+            if len(choice_ids) != len(set(choice_ids)):
+                raise ValueError("los identificadores de alternativas deben ser únicos")
+        return self
+
+
+# ---------------------------------------------------------------------------
+# 3.4. EnrichedQuestion
+# ---------------------------------------------------------------------------
+
+
+class EnrichedQuestion(QuestionRaw):
+    """Pregunta raw enriquecida con clasificación curricular y metadatos."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    course: Slug = Field(
+        ...,
+        description="Slug del curso, sin espacios (regex ^[a-z0-9_]+$).",
+    )
+    topic: Slug = Field(
+        ...,
+        description="Slug del tema, sin espacios (regex ^[a-z0-9_]+$).",
+    )
+    subtopic: Slug | None = Field(
+        default=None,
+        description="Slug del subtema, sin espacios, o None (regex ^[a-z0-9_]+$).",
+    )
+    difficulty: int = Field(
+        ...,
+        ge=1,
+        le=5,
+        description="Dificultad curricular en el rango 1-5.",
+    )
+    prerequisites: list[Slug] = Field(
+        default_factory=list,
+        description="Slugs canónicos de los prerrequisitos.",
+    )
+    source_metadata: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Metadatos del documento de origen (páginas, fichero, etc.).",
+    )
+    created_at: str = Field(
+        ...,
+        description="Fecha/hora de creación en ISO 8601, preferentemente con zona horaria.",
+    )
+
+    @field_validator("created_at")
+    @classmethod
+    def _validate_created_at(cls, value: str) -> str:
+        candidate = value.strip()
+        if candidate.endswith("Z"):
+            candidate = candidate[:-1] + "+00:00"
+        try:
+            datetime.fromisoformat(candidate)
+        except ValueError as exc:
+            raise ValueError(
+                f"created_at debe ser una fecha/hora ISO 8601 válida (recibido {value!r})"
+            ) from exc
+        return value
+
+
+# ---------------------------------------------------------------------------
+# 3.5. Esquema interno de transcripción
+# ---------------------------------------------------------------------------
+
+
+class TranscriptionIntermediate(BaseModel):
+    """Salida cruda del OCR local antes del pase remoto de estructuración.
+
+    Conserva el texto Markdown/TeX bruto, la referencia de origen, las páginas
+    involucradas, la información de figuras y las advertencias de lectura. NO
+    sustituye a :class:`QuestionRaw`: no realiza clasificación curricular ni
+    validación lógica.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_reference: str = Field(
+        ...,
+        min_length=1,
+        description="Referencia estable del origen (nombre de fichero o identificador).",
+    )
+    raw_markdown: str = Field(
+        ...,
+        description="Texto Markdown/TeX bruto transcrito por el OCR local.",
+    )
+    pages: list[int] = Field(
+        default_factory=list,
+        description="Índices físicos de página involucrados, basados en cero.",
+    )
+    figures: list[FigureReference] = Field(
+        default_factory=list,
+        description="Figuras detectadas con su geometría y referencia de origen.",
+    )
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="Advertencias de lectura, incluidos segmentos marcados como ilegibles.",
+    )
+
+    @field_validator("pages")
+    @classmethod
+    def _validate_pages(cls, value: list[int]) -> list[int]:
+        if any(page < 0 for page in value):
+            raise ValueError("los índices de página deben ser mayores o iguales a cero")
+        if len(value) != len(set(value)):
+            raise ValueError("los índices de página deben ser únicos")
+        return value

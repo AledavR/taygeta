@@ -1,0 +1,39 @@
+# Python y entornos
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.uv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Datos y directorios de ejecución
+/data/
+/assets/
+/downloads/
+/uploads/
+/tmp/
+/models/
+/cache/
+*.db
+*.db-journal
+*.db-wal
+
+# Pesos de modelos y archivos de gran tamaño
+*.gguf
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.bin
+
+# Secretos y logs
+.env
+.env.*
+!.env.example
+*.log
+ESPECIFICACION.txt
+
+# Herramientas y sistema
+.DS_Store

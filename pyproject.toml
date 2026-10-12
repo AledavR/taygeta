@@ -1,0 +1,55 @@
+[project]
+name = "taygeta"
+version = "0.1.0"
+description = "Banco de examenes cientificos y sistema de recuperacion MCP: ingesta hibrida, HITL, RAG y compilacion Typst."
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+dependencies = [
+    "mcp[cli]>=1.3.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.6.0",
+    "instructor>=1.7.0",
+    "openai>=1.60.0",
+    "pymupdf>=1.25.0",
+    "pillow>=11.0.0",
+    "streamlit>=1.40.0",
+    "pandoc>=2.4",
+    "boto3>=1.35.0",
+]
+
+[project.scripts]
+taygeta-ingest = "taygeta.ingest.pipeline:main"
+taygeta-server = "taygeta.server.mcp_server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/taygeta"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
