@@ -16,6 +16,8 @@ Flujo:
 
 from __future__ import annotations
 
+import argparse
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -67,6 +69,7 @@ __all__ = [
     "StructuredQuestion",
     "Structurer",
     "StructuringError",
+    "main",
 ]
 
 _PLACEHOLDER_RE = re.compile(PLACEHOLDER_PATTERN)
@@ -607,3 +610,31 @@ class IngestPipeline:
                 self._staging_data(result), status=result.status, session_id=session_id
             )
         return result
+
+
+def main(argv: list[str] | None = None) -> None:
+    """CLI mínima de ingesta (``taygeta-ingest``).
+
+    Procesa un documento con el pipeline híbrido (doble pase + validación en dos
+    capas), persiste la sesión de staging e imprime un resumen JSON.
+    """
+    parser = argparse.ArgumentParser(
+        prog="taygeta-ingest",
+        description="Ingesta híbrida de un documento PDF/PNG/JPG y resumen de staging.",
+    )
+    parser.add_argument("source", help="Ruta del documento a procesar")
+    parser.add_argument("--hint", default=None, help="Contexto correctivo para el análisis OCR/LLM")
+    parser.add_argument(
+        "--no-persist",
+        action="store_true",
+        help="No crear la sesión de staging en la base de datos",
+    )
+    args = parser.parse_args(argv)
+
+    pipeline = IngestPipeline(get_settings())
+    result = pipeline.ingest(args.source, hints=args.hint, persist_staging=not args.no_persist)
+    print(json.dumps(result.summary(), ensure_ascii=False, indent=2))
+
+
+if __name__ == "__main__":
+    main()

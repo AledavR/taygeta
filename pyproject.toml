@@ -2,6 +2,7 @@
 name = "taygeta"
 version = "0.1.0"
 description = "Banco de examenes cientificos y sistema de recuperacion MCP: ingesta hibrida, HITL, RAG y compilacion Typst."
+readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Proprietary" }
 dependencies = [
