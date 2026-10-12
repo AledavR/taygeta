@@ -5,7 +5,7 @@ description = "Banco de examenes cientificos y sistema de recuperacion MCP: inge
 requires-python = ">=3.11"
 license = { text = "Proprietary" }
 dependencies = [
-    "mcp[cli]>=1.3.0",
+    "mcp[cli]>=1.3.0,<2",
     "pydantic>=2.10.0",
     "pydantic-settings>=2.6.0",
     "instructor>=1.7.0",
