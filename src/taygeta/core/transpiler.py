@@ -192,8 +192,8 @@ _SYMBOLS = {
     "subset": "subset",
     "supset": "supset",
     "supseteq": "supset.eq",
-    "emptyset": "empty",
-    "varnothing": "empty",
+    "emptyset": "emptyset",
+    "varnothing": "emptyset",
     "forall": "forall",
     "exists": "exists",
     "neg": "not",
@@ -798,6 +798,106 @@ def _render_blocks(
 
 
 # ---------------------------------------------------------------------------
+# Sanitización de matemáticas para Typst
+# ---------------------------------------------------------------------------
+
+
+def _replace_empty_identifier(tex: str) -> str:
+    """Reescribe la palabra ``empty`` como ``\\emptyset`` dentro de una fórmula.
+
+    Algunos modelos OCR/LLM escriben ``empty`` (nombre del conjunto vacío en otras
+    sintaxis) donde Typst espera ``emptyset``; el transpilador no reconoce ese
+    identificador y Typst aborta con ``unknown variable: empty``. Solo se
+    reemplaza la palabra completa, de modo que ``\\emptyset`` (cuyo identificador
+    es ``emptyset``, no ``empty``) queda intacto. También se normaliza el comando
+    inválido ``\\empty`` a ``\\emptyset``.
+    """
+    parts: list[str] = []
+    index = 0
+    length = len(tex)
+    while index < length:
+        char = tex[index]
+        if char.isalpha():
+            end = index
+            while end < length and tex[end].isalnum():
+                end += 1
+            word = tex[index:end]
+            parts.append(r"\emptyset" if word == "empty" else word)
+            index = end
+            continue
+        if char == "\\" and index + 1 < length and tex[index + 1].isalpha():
+            end = index + 1
+            while end < length and tex[end].isalpha():
+                end += 1
+            command = tex[index + 1 : end]
+            parts.append(r"\emptyset" if command == "empty" else tex[index:end])
+            index = end
+            continue
+        parts.append(char)
+        index += 1
+    return "".join(parts)
+
+
+def _find_inline_math_close(text: str, start: int) -> int:
+    """Devuelve el índice del ``$`` que cierra una fórmula inline (o ``-1``).
+
+    Se ignoran los dólares escapados (``\\$``) que pudieran aparecer dentro de la
+    fórmula.
+    """
+    index = start
+    length = len(text)
+    while index < length:
+        if text[index] == "\\":
+            index += 2
+            continue
+        if text[index] == "$":
+            return index
+        index += 1
+    return -1
+
+
+def _rewrite_empty_set(markdown: str) -> str:
+    """Reemplaza ``empty`` por ``\\emptyset`` dentro de los bloques matemáticos.
+
+    Recorre el Markdown distinguiendo display (``$$...$$``) e inline (``$...$``) y
+    aplica :func:`_replace_empty_identifier` solo al interior de las fórmulas, de
+    modo que la palabra inglesa ``empty`` del texto normal nunca se altera.
+    """
+    parts: list[str] = []
+    index = 0
+    length = len(markdown)
+    while index < length:
+        char = markdown[index]
+        if char == "\\" and index + 1 < length and markdown[index + 1] == "$":
+            parts.append(markdown[index : index + 2])
+            index += 2
+            continue
+        if char != "$":
+            parts.append(char)
+            index += 1
+            continue
+        if markdown.startswith("$$", index):
+            close = markdown.find("$$", index + 2)
+            if close == -1:
+                parts.append(markdown[index:])
+                break
+            parts.append("$$")
+            parts.append(_replace_empty_identifier(markdown[index + 2 : close]))
+            parts.append("$$")
+            index = close + 2
+            continue
+        close = _find_inline_math_close(markdown, index + 1)
+        if close == -1:
+            parts.append(markdown[index:])
+            break
+        parts.append("$")
+        parts.append(_replace_empty_identifier(markdown[index + 1 : close]))
+        parts.append("$")
+        index = close + 1
+    return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # API pública
 # ---------------------------------------------------------------------------
 
@@ -815,9 +915,13 @@ def sanitize_math_for_typst(markdown: str) -> str:
       genere nodos ``DisplayMath``/``InlineMath`` y el renderizado produzca los
       delimitadores de bloque ``$ ... $`` de Typst;
     * ``\\|`` (barra de norma LaTeX) se reescribe como ``||`` (norma Typst) con
-      :func:`~taygeta.core.schema.sanitize_norm_bars`.
+      :func:`~taygeta.core.schema.sanitize_norm_bars`;
+    * la palabra ``empty`` dentro de fórmulas se reescribe como ``\\emptyset``
+      (símbolo del conjunto vacío) para evitar el error de Typst
+      ``unknown variable: empty``.
     """
-    return sanitize_norm_bars(sanitize_math_delimiters(markdown))
+    sanitized = sanitize_norm_bars(sanitize_math_delimiters(markdown))
+    return _rewrite_empty_set(sanitized)
 
 
 def markdown_to_typst(
