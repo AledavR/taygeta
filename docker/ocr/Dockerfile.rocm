@@ -31,6 +31,11 @@ RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
  && cmake --build build --config Release -j"$(nproc)" --target llama-server \
  && install -m 0755 build/bin/llama-server /usr/local/bin/llama-server
 
+# Instala las bibliotecas compartidas de llama.cpp (p. ej.
+# libllama-server-impl.so) en /usr/local/lib y refresca el enlazador dinámico.
+# Se hace en una capa aparte para no invalidar la compilación HIP cacheada.
+RUN cp -a build/bin/*.so* /usr/local/lib/ && ldconfig
+
 COPY docker/ocr/entrypoint.sh /usr/local/bin/ocr-entrypoint
 RUN chmod 0755 /usr/local/bin/ocr-entrypoint
 

@@ -37,8 +37,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /src/build/bin/llama-server /usr/local/bin/llama-server
+# Bibliotecas compartidas de llama.cpp (p. ej. libllama-server-impl.so).
+COPY --from=build /src/build/bin/*.so* /usr/local/lib/
 COPY docker/ocr/entrypoint.sh /usr/local/bin/ocr-entrypoint
-RUN chmod 0755 /usr/local/bin/ocr-entrypoint
+RUN chmod 0755 /usr/local/bin/ocr-entrypoint && ldconfig
 
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/ocr-entrypoint"]

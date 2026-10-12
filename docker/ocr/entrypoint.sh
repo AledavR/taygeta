@@ -12,6 +12,12 @@
 # ============================================================================
 set -euo pipefail
 
+# Rutas de bibliotecas compartidas: sistema, instalación local y árbol de
+# compilación de llama.cpp (relevante para variantes de una sola etapa, p. ej.
+# ROCm, donde las .so permanecen en /src/build/bin). Evita el error
+# "libllama-server-impl.so: cannot open shared object file".
+export LD_LIBRARY_PATH="/usr/local/lib:/usr/local/lib64:/app/lib:/src/build/bin:${LD_LIBRARY_PATH:-}"
+
 MODEL_PATH="${OCR_MODEL_PATH:-/models/model.gguf}"
 MMPROJ_PATH="${OCR_MMPROJ_PATH:-}"
 MODEL_URL="${OCR_MODEL_URL:-}"

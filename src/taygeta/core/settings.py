@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -81,6 +82,19 @@ class Settings(BaseSettings):
         default=8192, ge=512, description="Longitud de contexto del modelo OCR local."
     )
 
+    # -- Entorno de ejecución y base de datos -------------------------------
+    APP_ENV: Literal["local", "production"] = Field(
+        default="local",
+        description="Entorno de ejecución: 'local' o 'production'.",
+    )
+    DATABASE_URL: str = Field(
+        default="",
+        description=(
+            "URL de la base de datos (p. ej. sqlite:////app/data/taygeta.db). "
+            "Si está vacía, se usa DB_PATH."
+        ),
+    )
+
     # -- SQLite y directorios runtime ---------------------------------------
     DB_PATH: str = Field(default="/app/data/taygeta.db", description="Ruta de la base SQLite.")
     DOWNLOADS_DIR: str = Field(
@@ -98,6 +112,21 @@ class Settings(BaseSettings):
     # -- Almacenamiento de objetos S3/SeaweedFS -----------------------------
     S3_ENDPOINT_URL: str = Field(
         default="http://seaweedfs-s3:8333", description="Endpoint interno S3."
+    )
+    S3_PUBLIC_ENDPOINT: str = Field(
+        default="http://localhost:8333",
+        description=(
+            "Endpoint S3 público/externo para la UI (reescribe el host interno en "
+            "enlaces e imágenes para que sean accesibles desde el navegador)."
+        ),
+    )
+    S3_PUBLIC_BASE_URL: str = Field(
+        default="",
+        description=(
+            "Base pública para componer URLs de assets a partir de rutas relativas "
+            "(p. ej. https://assets.example.com). Se concatena con la ruta relativa "
+            "/buckets/{bucket}/{key} al enviar la información al frontend o al MCP."
+        ),
     )
     S3_BUCKET: str = Field(default="taygeta-assets", description="Bucket de figuras.")
     S3_ACCESS_KEY_ID: str = Field(default="change-me", description="Credencial de acceso S3.")
@@ -121,6 +150,14 @@ class Settings(BaseSettings):
     )
 
     # -- Validadores --------------------------------------------------------
+    @field_validator("APP_ENV", mode="before")
+    @classmethod
+    def _normalize_app_env(cls, value: object) -> str:
+        normalized = str(value).strip().lower() if value is not None else ""
+        if normalized not in ("local", "production"):
+            raise ValueError("APP_ENV debe ser 'local' o 'production'")
+        return normalized
+
     @field_validator("DB_PATH", "DOWNLOADS_DIR", "UPLOADS_DIR")
     @classmethod
     def _validate_runtime_paths(cls, value: str) -> str:
@@ -128,7 +165,14 @@ class Settings(BaseSettings):
             raise ValueError("la ruta no puede estar vacía")
         return value
 
-    @field_validator("LLM_BASE_URL", "OCR_BASE_URL", "S3_ENDPOINT_URL", "ASSET_PUBLIC_BASE_URL")
+    @field_validator(
+        "LLM_BASE_URL",
+        "OCR_BASE_URL",
+        "S3_ENDPOINT_URL",
+        "S3_PUBLIC_ENDPOINT",
+        "S3_PUBLIC_BASE_URL",
+        "ASSET_PUBLIC_BASE_URL",
+    )
     @classmethod
     def _strip_trailing_slash(cls, value: str) -> str:
         if value and value != "/":
@@ -154,6 +198,34 @@ class Settings(BaseSettings):
             and self.S3_BUCKET
             and self.S3_ACCESS_KEY_ID
             and self.S3_SECRET_ACCESS_KEY
+        )
+
+    @property
+    def is_production(self) -> bool:
+        """Indica si la aplicación se ejecuta en el entorno de producción."""
+        return self.APP_ENV == "production"
+
+    @property
+    def database_path(self) -> str:
+        """Ruta efectiva de la base de datos.
+
+        Si ``DATABASE_URL`` está configurada como URL ``sqlite://``, extrae la
+        ruta de la misma; en caso contrario usa ``DB_PATH``. Las URLs no SQLite
+        (p. ej. ``postgresql://``) no están soportadas por la capa SQLite actual
+        y provocan un ``ValueError`` explícito.
+        """
+        url = (self.DATABASE_URL or "").strip()
+        if not url:
+            return self.DB_PATH
+        if url == "sqlite://":
+            return ":memory:"
+        if url.startswith("sqlite:///"):
+            # sqlite:///rel.db  -> "rel.db"        (ruta relativa)
+            # sqlite:////abs.db -> "/abs.db"       (ruta absoluta)
+            # sqlite:///:memory: -> ":memory:"
+            return url[len("sqlite://") :][1:]
+        raise ValueError(
+            f"DATABASE_URL no soportada: {url!r}; la capa actual solo admite sqlite://"
         )
 
     def require_llm(self) -> None:
@@ -190,6 +262,8 @@ class Settings(BaseSettings):
     def safe_summary(self) -> dict[str, object]:
         """Resumen apto para logs, con todas las credenciales enmascaradas."""
         return {
+            "app_env": self.APP_ENV,
+            "database_url": mask_secret(self.DATABASE_URL),
             "llm_configured": self.llm_configured,
             "llm_base_url": self.LLM_BASE_URL,
             "llm_model": self.LLM_MODEL,
@@ -204,6 +278,8 @@ class Settings(BaseSettings):
             "uploads_dir": self.UPLOADS_DIR,
             "downloads_ttl_seconds": self.DOWNLOADS_TTL_SECONDS,
             "s3_endpoint_url": self.S3_ENDPOINT_URL,
+            "s3_public_endpoint": self.S3_PUBLIC_ENDPOINT,
+            "s3_public_base_url": self.S3_PUBLIC_BASE_URL,
             "s3_bucket": self.S3_BUCKET,
             "s3_region": self.S3_REGION,
             "s3_access_key_id": mask_secret(self.S3_ACCESS_KEY_ID),

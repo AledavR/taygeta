@@ -164,7 +164,7 @@ class Database:
                 idempotente al construir la instancia.
         """
         self.settings = settings or get_settings()
-        resolved = db_path if db_path is not None else self.settings.DB_PATH
+        resolved = db_path if db_path is not None else self.settings.database_path
         self.db_path = str(resolved)
         self._memory_connection: sqlite3.Connection | None = None
         self._fts5_enabled = False
@@ -667,5 +667,8 @@ class Database:
 
 
 def get_database() -> Database:
-    """Devuelve una instancia de :class:`Database` sobre ``DB_PATH``."""
-    return Database(get_settings().DB_PATH)
+    """Devuelve una instancia de :class:`Database` sobre la ruta efectiva.
+
+    Usa ``DATABASE_URL`` si está configurada; en caso contrario ``DB_PATH``.
+    """
+    return Database(get_settings().database_path)

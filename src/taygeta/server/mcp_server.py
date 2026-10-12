@@ -33,11 +33,12 @@ from taygeta.core.schema import (
     utc_now_iso,
 )
 from taygeta.core.settings import Settings, get_settings
+from taygeta.core.urls import build_public_url, build_relative_path, split_asset_reference
 from taygeta.ingest.pipeline import IngestPipeline
 from taygeta.ingest.validator import STATUS_NEEDS_ATTENTION, STATUS_VALID
 from taygeta.server.db import Database
 from taygeta.server.exam_generator import ExamGenerationError, ExamGenerator
-from taygeta.server.object_storage import ObjectStorage, ObjectStorageError, parse_s3_uri
+from taygeta.server.object_storage import ObjectStorage, ObjectStorageError
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ mcp = FastMCP("taygeta", host=_settings.MCP_HOST, port=_settings.MCP_PORT)
 
 def _resources() -> tuple[Settings, Database, ObjectStorage, IngestPipeline, ExamGenerator]:
     settings = get_settings()
-    database = Database(settings.DB_PATH, settings=settings)
+    database = Database(settings=settings)
     storage = ObjectStorage(settings)
     pipeline = IngestPipeline(settings, storage=storage, database=database)
     exams = ExamGenerator(settings, database=database, storage=storage)
@@ -72,6 +73,22 @@ def _resources() -> tuple[Settings, Database, ObjectStorage, IngestPipeline, Exa
 
 def _json(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _public_question(question: EnrichedQuestion, settings: Settings) -> dict[str, Any]:
+    """Serializa una pregunta resolviendo las rutas de figuras a URLs públicas.
+
+    Antes de enviar la información al frontend o al cliente MCP, cada ruta
+    relativa de figura (``/buckets/{bucket}/{key}``) se convierte en su URL
+    completa concatenando ``S3_PUBLIC_BASE_URL``.
+    """
+    data = question.model_dump()
+    for figure in data.get("figures", []):
+        reference = figure.get("asset_path")
+        if reference:
+            bucket, key = split_asset_reference(reference, default_bucket=settings.S3_BUCKET)
+            figure["asset_path"] = build_public_url(build_relative_path(bucket, key), settings)
+    return data
 
 
 def _resolve_upload_path(file_path: str, settings: Settings) -> Path:
@@ -270,7 +287,7 @@ def search_questions(
 ) -> str:
     """Recupera preguntas reales por curso, tema y dificultad (sin soluciones)."""
     try:
-        _settings, database, _storage, _pipeline, _exams = _resources()
+        settings, database, _storage, _pipeline, _exams = _resources()
         limit = max(1, min(limit, _MAX_SEARCH_LIMIT))
         questions = database.search_questions(
             course=course or None,
@@ -278,7 +295,12 @@ def search_questions(
             difficulty=difficulty if difficulty >= 1 else None,
             limit=limit,
         )
-        return _json({"count": len(questions), "questions": [q.model_dump() for q in questions]})
+        return _json(
+            {
+                "count": len(questions),
+                "questions": [_public_question(q, settings) for q in questions],
+            }
+        )
     except Exception as exc:  # noqa: BLE001
         return _json({"status": "error", "message": str(exc)})
 
@@ -369,10 +391,12 @@ def _enrich(payload: dict[str, Any], storage: ObjectStorage) -> EnrichedQuestion
     for figure in question.figures:
         if not figure.asset_path:
             raise ValueError(f"la figura {figure.id} no tiene identificador persistente")
-        if figure.asset_path.startswith("s3://"):
-            bucket, key = parse_s3_uri(figure.asset_path)
+        bucket, key = split_asset_reference(figure.asset_path)
+        if bucket:
             if not storage.exists(key, bucket=bucket):
                 raise ValueError(f"la figura {figure.id} no está en el bucket")
+        elif not storage.exists(figure.asset_path):
+            raise ValueError(f"la figura {figure.id} no está en el bucket")
     return question
 
 
@@ -400,7 +424,7 @@ async def download_file(request: Request) -> Response:
     return FileResponse(path, media_type=media_type, filename=path.name)
 
 
-@mcp.custom_route("/assets/{asset_id}", methods=["GET"])
+@mcp.custom_route("/assets/{asset_id:path}", methods=["GET"])
 async def asset_proxy(request: Request) -> Response:
     """Devuelve una figura desde SeaweedFS por su identificador controlado.
 

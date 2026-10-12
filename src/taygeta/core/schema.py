@@ -20,7 +20,9 @@ transcribe únicamente el contenido visible.
 
 from __future__ import annotations
 
+import hashlib
 import re
+import unicodedata
 import uuid
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
@@ -38,14 +40,19 @@ __all__ = [
     "CURRICULAR_SLUG_PATTERN",
     "ILLEGIBLE_MARKER",
     "PLACEHOLDER_PATTERN",
+    "RELATIVE_ASSET_PREFIX",
     "Choice",
     "EnrichedQuestion",
     "FigureReference",
     "QuestionRaw",
     "Slug",
     "TranscriptionIntermediate",
+    "compute_canonical_hash",
     "deterministic_question_id",
+    "is_relative_asset_path",
     "new_question_id",
+    "normalize_slug",
+    "slugify",
     "utc_now_iso",
 ]
 
@@ -63,6 +70,10 @@ ILLEGIBLE_MARKER = "[ILEGIBLE]"
 #: Placeholders que intercalan figuras dentro del enunciado, p. ej. ``{{fig:1}}``.
 PLACEHOLDER_PATTERN = r"\{\{fig:(\d+)\}\}"
 
+#: Prefijo canónico de las rutas relativas de assets, p. ej.
+#: ``/buckets/exams/img.png`` (equivalente a ``s3://exams/img.png``).
+RELATIVE_ASSET_PREFIX = "/buckets/"
+
 _PLACEHOLDER_RE = re.compile(PLACEHOLDER_PATTERN)
 _FIGURE_ID_PATTERN = r"^fig:\d+$"
 
@@ -74,6 +85,54 @@ Slug = Annotated[
 
 #: Namespace estable para UUID5 deterministas de preguntas.
 _QUESTION_ID_NAMESPACE = uuid.UUID("6f9619ff-8b86-d011-b42d-00c04fc964ff")
+
+
+def slugify(value: str | None) -> str:
+    """Convierte texto libre en un slug válido ``^[a-z0-9_]+$`` (o ``""``).
+
+    - separa las tildes/diacríticos (``Cálculo`` → ``calculo``);
+    - pasa a minúsculas;
+    - sustituye espacios y caracteres especiales por ``_``;
+    - colapsa ``_`` repetidos y recorta los de los extremos.
+    """
+    if value is None:
+        return ""
+    decomposed = unicodedata.normalize("NFKD", str(value))
+    without_marks = "".join(char for char in decomposed if not unicodedata.combining(char))
+    normalized = re.sub(r"[^a-z0-9_]+", "_", without_marks.strip().lower())
+    return re.sub(r"_+", "_", normalized).strip("_")
+
+
+def normalize_slug(value: str | None, default: str = "general") -> str:
+    """Normaliza un slug y devuelve ``default`` cuando queda vacío."""
+    return slugify(value) or default
+
+
+def is_relative_asset_path(value: str | None) -> bool:
+    """Indica si ``value`` es una ruta relativa de asset ``/buckets/{bucket}/{key}``.
+
+    Rechaza segmentos vacíos, ``.`` y ``..`` para impedir traversal, pero acepta
+    el prefijo ``/buckets/`` (que, a diferencia de ``/app/...`` o ``file://``, no
+    es una ruta local absoluta sino una ruta relativa al almacenamiento público).
+    """
+    if not value or not value.startswith(RELATIVE_ASSET_PREFIX):
+        return False
+    rest = value[len(RELATIVE_ASSET_PREFIX) :]
+    if not rest:
+        return False
+    return all(segment not in ("", ".", "..") for segment in rest.split("/"))
+
+
+def compute_canonical_hash(statement_raw: str, *, question_type: str = "") -> str:
+    """Calcula un hash canónico estable para la deduplicación futura de preguntas.
+
+    Normaliza los espacios y saltos de línea del enunciado y, opcionalmente,
+    añade el tipo de pregunta antes de aplicar SHA-256. No usa soluciones ni
+    respuestas correctas: solo el contenido visible del enunciado.
+    """
+    normalized = " ".join(str(statement_raw).split())
+    material = f"{question_type}|{normalized}" if question_type else normalized
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def new_question_id() -> str:
@@ -107,8 +166,14 @@ class FigureReference(BaseModel):
 
     ``bbox`` usa el formato ``[ymin, xmin, ymax, xmax]`` con coordenadas
     normalizadas en el rango ``0-1000``. ``asset_path`` es un identificador
-    estable de objeto (``s3://bucket/key`` o una clave relativa al bucket);
-    nunca una ruta local absoluta como ``/app/assets/...``.
+    estable de objeto:
+
+    * una ruta relativa pública ``/buckets/{bucket}/{key}`` (forma canónica
+      recomendada, p. ej. ``/buckets/exams/img.png``);
+    * una URI ``s3://bucket/key``;
+    * una clave de objeto relativa al bucket (sin ``/`` inicial).
+
+    Nunca una ruta local absoluta como ``/app/assets/...``.
     """
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -136,8 +201,8 @@ class FigureReference(BaseModel):
     asset_path: str | None = Field(
         default=None,
         description=(
-            "Identificador de objeto estable (s3://bucket/key o clave relativa). "
-            "Nunca una ruta local absoluta."
+            "Identificador de objeto estable: ruta relativa /buckets/{bucket}/{key}, "
+            "s3://bucket/key o clave relativa. Nunca una ruta local absoluta."
         ),
     )
 
@@ -159,15 +224,22 @@ class FigureReference(BaseModel):
     def _validate_asset_path(cls, value: str | None) -> str | None:
         if value is None:
             return value
+        if value.startswith(RELATIVE_ASSET_PREFIX):
+            if not is_relative_asset_path(value):
+                raise ValueError(
+                    "la ruta relativa de asset debe tener la forma /buckets/{bucket}/{key} "
+                    "sin segmentos vacíos, '.' ni '..'"
+                )
+            return value
         if value.startswith("/") or value.startswith("file://"):
             raise ValueError(
-                "asset_path no puede ser una ruta local absoluta; usa una URI "
+                "asset_path no puede ser una ruta local absoluta; usa /buckets/{bucket}/{key}, "
                 "s3://bucket/key o una clave de objeto relativa al bucket"
             )
         if re.match(r"^[a-zA-Z]:[\\/]", value):
             raise ValueError(
-                "asset_path no puede ser una ruta local absoluta de Windows; usa una "
-                "URI s3://bucket/key o una clave de objeto relativa al bucket"
+                "asset_path no puede ser una ruta local absoluta de Windows; usa "
+                "/buckets/{bucket}/{key}, s3://bucket/key o una clave de objeto relativa al bucket"
             )
         return value
 
@@ -320,6 +392,14 @@ class EnrichedQuestion(QuestionRaw):
     created_at: str = Field(
         ...,
         description="Fecha/hora de creación en ISO 8601, preferentemente con zona horaria.",
+    )
+    canonical_hash: str | None = Field(
+        default=None,
+        description=(
+            "Hash canónico (hex SHA-256) del enunciado normalizado, para la "
+            "deduplicación futura. Se calcula con ``compute_canonical_hash`` y nunca "
+            "incluye soluciones ni respuestas correctas."
+        ),
     )
 
     @field_validator("created_at")

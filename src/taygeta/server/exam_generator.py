@@ -31,8 +31,9 @@ from typing import Any
 from taygeta.core import transpiler
 from taygeta.core.schema import EnrichedQuestion, FigureReference
 from taygeta.core.settings import Settings, get_settings
+from taygeta.core.urls import split_asset_reference
 from taygeta.server.db import Database
-from taygeta.server.object_storage import ObjectStorage, parse_s3_uri
+from taygeta.server.object_storage import ObjectStorage
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +83,7 @@ class ExamGenerator:
         storage: ObjectStorage | None = None,
     ) -> None:
         self.settings = settings or get_settings()
-        self.database = database or Database(self.settings.DB_PATH, settings=self.settings)
+        self.database = database or Database(settings=self.settings)
         self.storage = storage or ObjectStorage(self.settings)
 
     # -- Recuperación (RAG) -------------------------------------------------
@@ -194,11 +195,10 @@ class ExamGenerator:
                 destination = directory / local_name
                 if destination.exists():
                     continue
-                if figure.asset_path.startswith("s3://"):
-                    bucket, key = parse_s3_uri(figure.asset_path)
-                    self.storage.download_to_file(key, destination, bucket=bucket)
-                else:
-                    self.storage.download_to_file(figure.asset_path, destination)
+                bucket, key = split_asset_reference(
+                    figure.asset_path, default_bucket=self.settings.S3_BUCKET
+                )
+                self.storage.download_to_file(key, destination, bucket=bucket)
         return mapping
 
     # -- Generación ---------------------------------------------------------

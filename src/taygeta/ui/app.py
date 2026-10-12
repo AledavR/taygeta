@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import logging
 import re
-import unicodedata
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -32,14 +31,18 @@ from typing import Any
 
 import streamlit as st
 
+from taygeta.agents.enrichment import EnrichmentError, EnrichmentResult, QuestionEnricher
 from taygeta.core.schema import (
     Choice,
     EnrichedQuestion,
     QuestionRaw,
     TranscriptionIntermediate,
+    normalize_slug,
+    slugify,
     utc_now_iso,
 )
 from taygeta.core.settings import Settings, get_settings
+from taygeta.core.urls import build_public_url, build_relative_path, split_asset_reference
 from taygeta.ingest.image_extractor import (
     is_supported_source,
     open_document,
@@ -48,7 +51,7 @@ from taygeta.ingest.image_extractor import (
 from taygeta.ingest.pipeline import IngestPipeline, StagedQuestion, StagingResult
 from taygeta.ingest.validator import STATUS_NEEDS_ATTENTION, STATUS_VALID
 from taygeta.server.db import Database, DatabaseError
-from taygeta.server.object_storage import ObjectStorage, ObjectStorageError, parse_s3_uri
+from taygeta.server.object_storage import ObjectStorage, ObjectStorageError
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +63,7 @@ __all__ = [
     "main",
     "page_image_bytes",
     "persist_approved_questions",
+    "public_s3_url",
     "sanitize_upload_name",
     "save_upload",
 ]
@@ -67,11 +71,18 @@ __all__ = [
 #: Extensiones aceptadas por el cargador de archivos.
 UPLOAD_EXTENSIONS = ["pdf", "png", "jpg", "jpeg"]
 
-_NEW_COURSE = "<nuevo curso>"
-_NEW_TOPIC = "<nuevo tema>"
-_NEW_SUBTOPIC = "<nuevo subtema>"
-_NO_SUBTOPIC = "(ninguno)"
 _SLUG_RE = re.compile(r"^[a-z0-9_]+$")
+
+#: Alias locales de los helpers compartidos de ``taygeta.core.schema``.
+_slugify = slugify
+_normalize_slug = normalize_slug
+
+
+def _slug_split(text: str | None) -> list[str]:
+    """Divide una cadena separada por comas en slugs normalizados (sin vacíos)."""
+    if not text:
+        return []
+    return [slug for slug in (_slugify(part) for part in text.split(",")) if slug]
 
 
 # ---------------------------------------------------------------------------
@@ -112,17 +123,17 @@ def list_uploads(uploads_dir: str | Path) -> list[Path]:
 def figure_bytes(storage: ObjectStorage | None, asset_path: str | None) -> bytes | None:
     """Recupera los bytes de una figura desde SeaweedFS a partir de su referencia.
 
-    Acepta una URI ``s3://bucket/key`` o una clave de objeto. Devuelve ``None``
-    si la referencia está vacía o el objeto no se puede recuperar.
+    Acepta ``/buckets/{bucket}/{key}``, ``s3://bucket/key`` o una clave de objeto.
+    Devuelve ``None`` si la referencia está vacía o el objeto no se puede recuperar.
     """
     if storage is None or not asset_path:
         return None
     try:
-        if asset_path.startswith("s3://"):
-            bucket, key = parse_s3_uri(asset_path)
+        bucket, key = split_asset_reference(asset_path)
+        if bucket:
             return storage.get_bytes(key, bucket=bucket)
-        return storage.get_bytes(asset_path)
-    except ObjectStorageError as exc:
+        return storage.get_bytes(key)
+    except (ObjectStorageError, ValueError) as exc:
         logger.warning("no se pudo recuperar la figura %s: %s", asset_path, exc)
         return None
 
@@ -141,31 +152,56 @@ def page_image_bytes(source_path: str | Path, page_index: int, *, dpi: int = 150
         return None
 
 
+def public_s3_url(url: str | None, settings: Settings) -> str:
+    """Reescribe el endpoint interno de S3 por el público de la UI.
+
+    Sustituye el prefijo ``S3_ENDPOINT_URL`` (p. ej. ``http://seaweedfs-s3:8333``)
+    por ``S3_PUBLIC_ENDPOINT`` (p. ej. ``http://localhost:8333``) para poder abrir
+    enlaces e imágenes desde el navegador del host. Si no hay endpoint público o
+    la URL no usa el interno, se devuelve sin cambios.
+    """
+    if not url:
+        return ""
+    internal = (settings.S3_ENDPOINT_URL or "").rstrip("/")
+    public = (settings.S3_PUBLIC_ENDPOINT or "").rstrip("/")
+    if public and internal and url.startswith(internal):
+        return public + url[len(internal) :]
+    return url
+
+
+def asset_browser_url(
+    asset_path: str | None,
+    settings: Settings,
+    storage: ObjectStorage | None = None,
+) -> str:
+    """Devuelve una URL para abrir una figura desde el navegador del host.
+
+    Orden de preferencia: ``S3_PUBLIC_BASE_URL`` (concatenada con la ruta
+    relativa), ``ASSET_PUBLIC_BASE_URL`` (legacy), el proxy ``/assets/{key}`` de
+    la aplicación y, en último caso, la URL reescrita del endpoint interno al
+    público.
+    """
+    if not asset_path:
+        return ""
+    bucket, key = split_asset_reference(asset_path, default_bucket=settings.S3_BUCKET)
+    if settings.S3_PUBLIC_BASE_URL:
+        return build_public_url(build_relative_path(bucket, key), settings)
+    if settings.ASSET_PUBLIC_BASE_URL:
+        return f"{settings.ASSET_PUBLIC_BASE_URL.rstrip('/')}/{key}"
+    proxy_base = (settings.DOWNLOAD_PUBLIC_URL or "").rstrip("/")
+    if proxy_base:
+        return f"{proxy_base}/assets/{key}"
+    if storage is not None:
+        try:
+            return public_s3_url(storage.display_url(asset_path), settings)
+        except ObjectStorageError:
+            return ""
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Construcción y persistencia de preguntas aprobadas
 # ---------------------------------------------------------------------------
-
-
-def _slugify(value: str | None) -> str:
-    """Convierte texto libre en un slug válido ``^[a-z0-9_]+$`` (o ``""``).
-
-    - separa las tildes/diacríticos (``Cálculo`` → ``calculo``);
-    - pasa a minúsculas;
-    - sustituye espacios y caracteres especiales por ``_``;
-    - colapsa ``_`` repetidos y recorta los de los extremos.
-    """
-    if value is None:
-        return ""
-    decomposed = unicodedata.normalize("NFKD", str(value))
-    without_marks = "".join(char for char in decomposed if not unicodedata.combining(char))
-    normalized = re.sub(r"[^a-z0-9_]+", "_", without_marks.strip().lower())
-    normalized = re.sub(r"_+", "_", normalized).strip("_")
-    return normalized
-
-
-def _normalize_slug(value: str | None, default: str = "general") -> str:
-    """Normaliza un slug y devuelve ``default`` cuando queda vacío."""
-    return _slugify(value) or default
 
 
 def build_enriched_question(
@@ -225,13 +261,13 @@ def _missing_figure_assets(question: EnrichedQuestion, storage: ObjectStorage | 
         if storage is None:
             continue
         try:
-            if figure.asset_path.startswith("s3://"):
-                bucket, key = parse_s3_uri(figure.asset_path)
+            bucket, key = split_asset_reference(figure.asset_path)
+            if bucket:
                 if not storage.exists(key, bucket=bucket):
                     missing.append(figure.asset_path)
-            elif not storage.exists(figure.asset_path):
+            elif not storage.exists(key):
                 missing.append(figure.asset_path)
-        except ObjectStorageError:
+        except (ObjectStorageError, ValueError):
             missing.append(figure.asset_path)
     return missing
 
@@ -277,12 +313,13 @@ def persist_approved_questions(
 
 
 @st.cache_resource
-def _resources() -> tuple[Settings, Database, ObjectStorage, IngestPipeline]:
+def _resources() -> tuple[Settings, Database, ObjectStorage, IngestPipeline, QuestionEnricher]:
     settings = get_settings()
-    database = Database(settings.DB_PATH, settings=settings)
+    database = Database(settings=settings)
     storage = ObjectStorage(settings)
     pipeline = IngestPipeline(settings, storage=storage, database=database)
-    return settings, database, storage, pipeline
+    enricher = QuestionEnricher(settings)
+    return settings, database, storage, pipeline, enricher
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +332,7 @@ def _render_reference_image(
     staged: StagedQuestion,
     storage: ObjectStorage | None,
     container: Any,
+    settings: Settings,
 ) -> None:
     """Muestra el recorte de figura o la página original junto al enunciado."""
     question = staged.question
@@ -314,6 +352,9 @@ def _render_reference_image(
                 shown = True
             except ObjectStorageError:
                 shown = False
+        browser_url = asset_browser_url(figure.asset_path, settings, storage)
+        if browser_url:
+            container.caption(f"[Abrir {figure.id} en el navegador]({browser_url})")
     if shown or source_path is None:
         return
     pages = [0]
@@ -325,16 +366,18 @@ def _render_reference_image(
             container.image(data, caption=f"Página original {page_index}")
 
 
-def _taxonomy_defaults(staged: StagedQuestion) -> tuple[str | None, int, list[str]]:
-    """Valores por defecto seguros para los selectores de taxonomía.
+def _taxonomy_defaults(staged: StagedQuestion) -> dict[str, Any]:
+    """Valores por defecto seguros (vía ``getattr``) para la taxonomía.
 
     El objeto en staging es habitualmente un ``QuestionRaw``, que **no** define
-    ``subtopic``, ``difficulty`` ni ``prerequisites`` (esos campos son exclusivos
+    ``course``/``topic``/``subtopic``/``difficulty``/``prerequisites`` (exclusivos
     de ``EnrichedQuestion``). Se accede con ``getattr`` para soportar ambos casos
-    sin lanzar ``AttributeError``; si el objeto ya está enriquecido, se reutilizan
-    sus valores.
+    sin lanzar ``AttributeError``; si la pregunta ya está enriquecida, se
+    reutilizan sus valores.
     """
     base = staged.question
+    course = getattr(base, "course", "") or ""
+    topic = getattr(base, "topic", "") or ""
     subtopic = getattr(base, "subtopic", None)
     difficulty = getattr(base, "difficulty", 3)
     prerequisites = getattr(base, "prerequisites", None) or []
@@ -343,70 +386,120 @@ def _taxonomy_defaults(staged: StagedQuestion) -> tuple[str | None, int, list[st
         subtopic = None
     if not isinstance(difficulty, int) or isinstance(difficulty, bool) or not 1 <= difficulty <= 5:
         difficulty = 3
-    return subtopic, difficulty, list(prerequisites)
+    return {
+        "course": course,
+        "topic": topic,
+        "subtopic": subtopic,
+        "difficulty": difficulty,
+        "prerequisites": list(prerequisites),
+    }
 
 
 def _render_taxonomy_controls(
-    index: int, database: Database, staged: StagedQuestion
+    index: int,
+    database: Database,
+    staged: StagedQuestion,
+    suggestion: EnrichmentResult | None = None,
 ) -> tuple[str, str, str | None, int, list[str], list[str]]:
-    """Dibuja los selectores de taxonomía y devuelve los valores elegidos."""
-    base_subtopic, base_difficulty, default_prereqs = _taxonomy_defaults(staged)
+    """Dibuja la taxonomía y devuelve los valores elegidos.
 
-    courses = sorted({course["slug"] for course in database.list_courses()})
-    course_choice = st.selectbox("Curso", [*courses, _NEW_COURSE], key=f"course_{index}")
-    course = course_choice
-    if course_choice == _NEW_COURSE:
-        course = st.text_input("Slug del nuevo curso", key=f"new_course_{index}").strip()
+    Si se recibe una ``suggestion`` inferida por IA, se usa para **pre-rellenar**
+    los controles (curso, tema, subtema, dificultad y prerrequisitos); en caso
+    contrario se reutilizan los valores existentes de la pregunta.
+    """
+    defaults = _taxonomy_defaults(staged)
+    suggested_course = suggestion.course if suggestion else ""
+    suggested_topic = suggestion.topic if suggestion else ""
+    suggested_subtopic = suggestion.subtopic if suggestion else None
+    suggested_difficulty = suggestion.difficulty if suggestion else None
+    suggested_prerequisites = list(suggestion.prerequisites) if suggestion else []
 
-    topics = sorted(
-        {topic["topic_slug"] for topic in database.list_topics(course)} if course else set()
-    )
-    topic_choice = st.selectbox("Tema", [*topics, _NEW_TOPIC], key=f"topic_{index}")
-    topic = topic_choice
-    if topic_choice == _NEW_TOPIC:
-        topic = st.text_input("Slug del nuevo tema", key=f"new_topic_{index}").strip()
+    course_default = suggested_course or defaults["course"]
+    topic_default = suggested_topic or defaults["topic"]
+    subtopic_default = suggested_subtopic or defaults["subtopic"] or ""
+    difficulty_default = suggested_difficulty or defaults["difficulty"]
 
-    subtopics = sorted(
-        {
-            topic_row["subtopic_slug"]
-            for topic_row in database.list_topics(course)
-            if topic_row["topic_slug"] == topic and topic_row["subtopic_slug"]
-        }
-        if course
-        else set()
-    )
-    # Conservar el subtema existente aunque no esté todavía en el catálogo.
-    if base_subtopic and base_subtopic not in subtopics:
-        subtopics = sorted({*subtopics, base_subtopic})
-    subtopic_options = [_NO_SUBTOPIC, *subtopics, _NEW_SUBTOPIC]
-    subtopic_index = (
-        subtopic_options.index(base_subtopic) if base_subtopic in subtopic_options else 0
-    )
-    subtopic_choice = st.selectbox(
-        "Subtema", subtopic_options, index=subtopic_index, key=f"subtopic_{index}"
-    )
-    if subtopic_choice == _NEW_SUBTOPIC:
-        subtopic: str | None = st.text_input(
-            "Slug del nuevo subtema", key=f"new_subtopic_{index}"
-        ).strip()
-    elif subtopic_choice == _NO_SUBTOPIC:
-        subtopic = None
-    else:
-        subtopic = subtopic_choice
+    # "Generación": al aplicar una nueva sugerencia se cambian las claves de los
+    # widgets para que los nuevos valores por defecto se apliquen sin avisos de
+    # ``session_state``.
+    generation = st.session_state.get(f"taxonomy_gen_{index}", 0)
 
+    def widget_key(name: str) -> str:
+        return f"{name}_{index}_{generation}"
+
+    courses = sorted({row["slug"] for row in database.list_courses()})
+    course = st.text_input(
+        "Curso (slug snake_case)",
+        value=course_default,
+        key=widget_key("course"),
+        help=f"Cursos existentes: {', '.join(courses) or '(ninguno)'}",
+    )
+    topic = st.text_input(
+        "Tema (slug snake_case)",
+        value=topic_default,
+        key=widget_key("topic"),
+        help="Se crea en el catálogo al confirmar si no existe.",
+    )
+    subtopic_raw = st.text_input(
+        "Subtema (slug snake_case, opcional)",
+        value=subtopic_default,
+        key=widget_key("subtopic"),
+    )
     difficulty = st.slider(
-        "Dificultad", min_value=1, max_value=5, value=base_difficulty, key=f"diff_{index}"
+        "Dificultad (1-5, complejidad matemática)",
+        min_value=1,
+        max_value=5,
+        value=int(difficulty_default),
+        key=widget_key("diff"),
     )
 
-    catalog = sorted({prereq["slug"] for prereq in database.list_prerequisites()})
+    prereq_default = list(dict.fromkeys([*suggested_prerequisites, *defaults["prerequisites"]]))
+    catalog = sorted({row["slug"] for row in database.list_prerequisites()})
+    options = sorted({*catalog, *prereq_default})
     prerequisites = st.multiselect(
-        "Prerrequisitos", catalog, default=default_prereqs, key=f"prereq_{index}"
+        "Prerrequisitos",
+        options,
+        default=[slug for slug in prereq_default if slug in options],
+        key=widget_key("prereq"),
     )
     new_prereqs_raw = st.text_input(
-        "Nuevos prerrequisitos (separados por coma)", key=f"new_prereq_{index}"
+        "Nuevos prerrequisitos (separados por coma)", key=widget_key("new_prereq")
     )
-    new_prereqs = [slug.strip() for slug in new_prereqs_raw.split(",") if slug.strip()]
-    return course, topic, subtopic, difficulty, prerequisites, new_prereqs
+    return (
+        course,
+        topic,
+        _slugify(subtopic_raw) or None,
+        difficulty,
+        prerequisites,
+        _slug_split(new_prereqs_raw),
+    )
+
+
+def _apply_enrichment(index: int, suggestion: EnrichmentResult) -> None:
+    """Guarda la sugerencia y fuerza el re-prellenado de los controles."""
+    st.session_state[f"enrichment_{index}"] = suggestion
+    st.session_state[f"taxonomy_gen_{index}"] = st.session_state.get(f"taxonomy_gen_{index}", 0) + 1
+
+
+def _enrich_all(result: StagingResult) -> None:
+    """Infiere la taxonomía de todas las preguntas de la sesión de staging."""
+    enricher = st.session_state.get("_enricher")
+    if enricher is None:
+        st.error("Enriquecedor no disponible (LLM no configurado).")
+        return
+    errors: list[str] = []
+    for index, staged in enumerate(result.questions):
+        if staged.question is None:
+            continue
+        try:
+            suggestion = enricher.enrich(staged.question)
+        except EnrichmentError as exc:
+            errors.append(f"Pregunta {index + 1}: no se pudo inferir la taxonomía ({exc}).")
+            continue
+        _apply_enrichment(index, suggestion)
+    if errors:
+        st.session_state["_enrich_errors"] = errors
+    st.rerun()
 
 
 def _render_review(
@@ -427,6 +520,16 @@ def _render_review(
     if result.warnings:
         joined = "\n".join(f"- {warning}" for warning in result.warnings)
         st.warning("Advertencias de OCR:\n" + joined)
+
+    for enrichment_error in st.session_state.pop("_enrich_errors", []):
+        st.warning(enrichment_error)
+
+    st.caption(
+        "La taxonomía, la dificultad y los prerrequisitos pueden inferirse con IA y "
+        "luego editarse manualmente antes de confirmar."
+    )
+    if st.button("Inferir taxonomía con IA (todas las preguntas)"):
+        _enrich_all(result)
 
     approved: list[tuple[EnrichedQuestion, list[str]]] = []
 
@@ -478,7 +581,7 @@ def _render_review(
             with right:
                 st.caption("Enunciado renderizado")
                 st.markdown(new_statement)
-                _render_reference_image(source_path, staged, storage, st)
+                _render_reference_image(source_path, staged, storage, st, settings)
 
             hint = st.text_input(
                 "Contexto correctivo (p. ej. «La condición ilegible es g(x) = ...»)",
@@ -505,8 +608,22 @@ def _render_review(
                     st.session_state["staging_result"] = result
                     st.rerun()
 
+            if st.button("Sugerir taxonomía con IA", key=f"enrich_{index}"):
+                enricher = st.session_state.get("_enricher")
+                if enricher is None:
+                    st.error("Enriquecedor no disponible (LLM no configurado).")
+                else:
+                    try:
+                        suggestion = enricher.enrich(base)
+                    except EnrichmentError as exc:
+                        st.error(f"No se pudo inferir la taxonomía: {exc}")
+                    else:
+                        _apply_enrichment(index, suggestion)
+                        st.rerun()
+
+            suggestion = st.session_state.get(f"enrichment_{index}")
             course, topic, subtopic, difficulty, prerequisites, new_prereqs = (
-                _render_taxonomy_controls(index, database, staged)
+                _render_taxonomy_controls(index, database, staged, suggestion)
             )
 
             approved_question = build_enriched_question(
@@ -592,7 +709,10 @@ def _sidebar(settings: Settings, database: Database, storage: ObjectStorage) -> 
             )
         except DatabaseError as exc:
             st.error(f"Base de datos no disponible: {exc}")
-        st.caption(f"S3: {settings.S3_BUCKET} @ {settings.S3_ENDPOINT_URL}")
+        public_endpoint = public_s3_url(settings.S3_ENDPOINT_URL, settings)
+        st.caption(f"S3: {settings.S3_BUCKET} @ {public_endpoint}")
+        if public_endpoint and public_endpoint != settings.S3_ENDPOINT_URL:
+            st.caption(f"(endpoint interno: {settings.S3_ENDPOINT_URL})")
         if not settings.llm_configured:
             st.warning(
                 "LLM remoto sin configurar: la validación semántica quedará en NEEDS_ATTENTION."
@@ -607,19 +727,13 @@ def _sidebar(settings: Settings, database: Database, storage: ObjectStorage) -> 
 # ---------------------------------------------------------------------------
 
 
-def main() -> None:
-    """Renderiza la aplicación Streamlit de revisión Human-in-the-Loop."""
-    st.set_page_config(page_title="Taygeta — Revisión HITL", layout="wide")
-    st.title("Taygeta — Ingesta y revisión Human-in-the-Loop")
-
-    try:
-        settings, database, storage, pipeline = _resources()
-    except Exception as exc:  # noqa: BLE001
-        st.error(f"No se pudieron inicializar los servicios: {exc}")
-        return
-    st.session_state["_pipeline"] = pipeline
-    _sidebar(settings, database, storage)
-
+def _render_ingest_tab(
+    settings: Settings,
+    database: Database,
+    storage: ObjectStorage,
+    pipeline: IngestPipeline,
+) -> None:
+    """Pestaña de subida, procesamiento y revisión Human-in-the-Loop."""
     st.subheader("1. Subir documento")
     uploaded = st.file_uploader(
         "PDF, PNG o JPG", type=UPLOAD_EXTENSIONS, accept_multiple_files=False
@@ -658,6 +772,81 @@ def main() -> None:
 
     st.subheader("3. Revisión y confirmación")
     _render_review(result, settings, database, storage, st.session_state.get("processed_path"))
+
+
+def _render_question_bank(database: Database, settings: Settings) -> None:
+    """Pestaña de exploración del banco de preguntas guardadas (SQLite + FTS5)."""
+    st.subheader("Banco de preguntas")
+    try:
+        status = database.status()
+    except DatabaseError as exc:
+        st.error(f"Base de datos no disponible: {exc}")
+        return
+    st.metric("Preguntas registradas", status["counts"]["questions"])
+
+    courses = ["(todos)", *sorted({c["slug"] for c in database.list_courses()})]
+    course = st.selectbox("Filtrar por curso", courses, key="bank_course")
+    course_filter = None if course == "(todos)" else course
+
+    topics = ["(todos)"]
+    if course_filter:
+        topics += sorted({t["topic_slug"] for t in database.list_topics(course_filter)})
+    topic = st.selectbox("Filtrar por tema", topics, key="bank_topic")
+    topic_filter = None if topic == "(todos)" else topic
+
+    query = st.text_input("Buscar en el enunciado (Markdown/TeX, FTS5)", key="bank_query").strip()
+    limit = st.slider("Máximo de resultados", 5, 100, 20, step=5, key="bank_limit")
+    try:
+        questions = database.search_questions(
+            query=query or None,
+            course=course_filter,
+            topic=topic_filter,
+            limit=limit,
+        )
+    except DatabaseError as exc:
+        st.error(f"Error en la búsqueda: {exc}")
+        return
+
+    st.caption(f"{len(questions)} resultado(s).")
+    if not questions:
+        st.info("No hay preguntas que cumplan los filtros.")
+        return
+    for question in questions:
+        header = f"[{question.course}/{question.topic}] dificultad {question.difficulty}"
+        with st.expander(header):
+            st.markdown(question.statement_raw)
+            st.json(
+                {
+                    "id": question.id,
+                    "course": question.course,
+                    "topic": question.topic,
+                    "subtopic": question.subtopic,
+                    "difficulty": question.difficulty,
+                    "prerequisites": question.prerequisites,
+                    "created_at": question.created_at,
+                }
+            )
+
+
+def main() -> None:
+    """Renderiza la aplicación Streamlit (ingesta/revisión + banco de preguntas)."""
+    st.set_page_config(page_title="Taygeta — Revisión HITL", layout="wide")
+    st.title("Taygeta — Ingesta y revisión Human-in-the-Loop")
+
+    try:
+        settings, database, storage, pipeline, enricher = _resources()
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"No se pudieron inicializar los servicios: {exc}")
+        return
+    st.session_state["_pipeline"] = pipeline
+    st.session_state["_enricher"] = enricher
+    _sidebar(settings, database, storage)
+
+    tab_ingest, tab_bank = st.tabs(["Ingesta y revisión", "Banco de preguntas"])
+    with tab_ingest:
+        _render_ingest_tab(settings, database, storage, pipeline)
+    with tab_bank:
+        _render_question_bank(database, settings)
 
 
 if __name__ == "__main__":

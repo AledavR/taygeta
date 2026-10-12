@@ -27,6 +27,7 @@ from botocore.client import Config
 from botocore.exceptions import BotoCoreError, ClientError
 
 from taygeta.core.settings import Settings, get_settings
+from taygeta.core.urls import build_public_url, build_relative_path, split_asset_reference
 
 if TYPE_CHECKING:
     pass  # type: ignore[import-not-found]
@@ -433,19 +434,34 @@ class ObjectStorage:
     def resolve(self, reference: str) -> tuple[str, str]:
         """Resuelve una referencia estable a ``(bucket, key)`` validado.
 
-        Acepta tanto ``s3://bucket/key`` como una clave relativa al bucket
-        configurado. Rechaza traversal y rutas absolutas, por lo que es apto
-        para el endpoint proxy ``/assets/{asset_id}``.
+        Acepta ``s3://bucket/key``, ``/buckets/{bucket}/{key}`` o una clave
+        relativa al bucket configurado. Rechaza traversal y rutas locales
+        absolutas, por lo que es apto para el endpoint proxy ``/assets/{asset_id}``.
         """
         return self._split_reference(reference)
+
+    def relative_path(self, reference: str) -> str:
+        """Devuelve la ruta relativa canónica ``/buckets/{bucket}/{key}`` de una referencia."""
+        bucket, key = self._split_reference(reference)
+        return build_relative_path(bucket, key)
+
+    def public_url(self, reference: str) -> str:
+        """Devuelve la URL pública completa de una referencia de asset.
+
+        Concatena ``S3_PUBLIC_BASE_URL`` con la ruta relativa canónica, para
+        enviar la información al frontend o al cliente MCP.
+        """
+        return build_public_url(self.relative_path(reference), self.settings)
 
     def _split_reference(self, reference: str) -> tuple[str, str]:
         value = (reference or "").strip()
         if not value:
             raise ObjectStorageError("la referencia de asset no puede estar vacía")
-        if value.startswith(_S3_SCHEME):
-            return parse_s3_uri(value)
-        return self.bucket, validate_object_key(value)
+        try:
+            bucket, key = split_asset_reference(value, default_bucket=self.bucket)
+        except ValueError as exc:
+            raise ObjectStorageError(str(exc)) from exc
+        return bucket or self.bucket, validate_object_key(key)
 
     @staticmethod
     def _wrap_error(operation: str, key: str, exc: Exception) -> ObjectStorageError:

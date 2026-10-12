@@ -34,6 +34,7 @@ import pymupdf as fitz
 from PIL import Image
 
 from taygeta.core.schema import FigureReference
+from taygeta.core.urls import relative_path_from_s3_uri
 
 if TYPE_CHECKING:
     from taygeta.server.object_storage import ObjectStorage
@@ -590,17 +591,18 @@ def upload_crops(
     delete_local: bool = True,
     extension: str = ".png",
 ) -> list[FigureCrop]:
-    """Sube los recortes a SeaweedFS y anota su URI estable.
+    """Sube los recortes a SeaweedFS y anota su ruta relativa estable.
 
-    Las figuras definitivas viven en S3 con una clave estable. Cuando
-    ``delete_local`` es ``True`` se elimina la copia temporal para no guardar
-    permanentemente una segunda copia local.
+    Las figuras definitivas viven en S3 y se referencian mediante una ruta
+    relativa ``/buckets/{bucket}/{key}`` (forma canónica de almacenamiento,
+    independiente del endpoint). Cuando ``delete_local`` es ``True`` se elimina
+    la copia temporal para no guardar permanentemente una segunda copia local.
     """
     for crop in crops:
         if crop.path is None:
             continue
         uri = storage.store_asset_file(crop.path, prefix=prefix, asset_id=None, extension=extension)
-        crop.asset_uri = uri
+        crop.asset_uri = relative_path_from_s3_uri(uri)
         if delete_local:
             try:
                 crop.path.unlink()

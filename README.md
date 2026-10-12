@@ -191,6 +191,18 @@ Copia el ejemplo de entorno antes de levantar el stack:
 cp .env.example .env      # completa LLM_*, OCR_MODEL_PATH, credenciales S3
 ```
 
+Configuración dual (local/producción):
+
+```dotenv
+APP_ENV=local                       # 'local' o 'production'
+DATABASE_URL=                       # opcional; si está vacía se usa DB_PATH
+                                    # p. ej. sqlite:////app/data/taygeta.db
+```
+
+- `APP_ENV` marca el entorno de ejecución (`Settings.is_production`).
+- `DATABASE_URL` permite apuntar a otra ruta SQLite sin tocar `DB_PATH`; las URLs
+  no SQLite no están soportadas por la capa actual y producen un error explícito.
+
 ### Base / CPU (neutral respecto de GPU)
 
 ```bash
@@ -328,16 +340,20 @@ curl -s "${LLM_BASE_URL%/}/models" -H "Authorization: Bearer ${LLM_API_KEY}" | h
 
 ## Almacenamiento SeaweedFS (S3)
 
-Las figuras definitivas se guardan como objetos S3 con **clave estable**
-(`s3://bucket/key`), nunca como rutas locales ni URLs firmadas persistentes.
+Las figuras definitivas se guardan como objetos S3 con **ruta relativa estable**
+(`/buckets/{bucket}/{key}`, p. ej. `/buckets/exams/img.png`), nunca como rutas
+locales ni URLs firmadas persistentes. La ruta relativa es portable entre entornos
+y se resuelve a URL completa solo al enviar la información al frontend o al MCP.
 
 ```dotenv
 S3_ENDPOINT_URL=http://seaweedfs-s3:8333   # endpoint interno (red Docker)
+S3_PUBLIC_ENDPOINT=http://localhost:8333   # endpoint público para el navegador (UI)
+S3_PUBLIC_BASE_URL=                        # base pública para /buckets/{bucket}/{key}
 S3_BUCKET=taygeta-assets
 S3_ACCESS_KEY_ID=change-me
 S3_SECRET_ACCESS_KEY=change-me
 S3_REGION=us-east-1
-ASSET_PUBLIC_BASE_URL=                     # base pública/proxy opcional para la UI
+ASSET_PUBLIC_BASE_URL=                     # base pública/proxy opcional (legacy, UI)
 ASSET_URL_TTL_SECONDS=300
 ```
 
@@ -346,10 +362,13 @@ ASSET_URL_TTL_SECONDS=300
   credenciales de la aplicación y del gateway siempre coinciden. El esquema del
   fichero IAM queda documentado en `docker/seaweedfs/s3.json.example`.
   Cámbialas antes de cualquier despliegue no local.
-- **Endpoint interno vs público**: los contenedores usan `http://seaweedfs-s3:8333`.
-  El navegador nunca debe apuntar a un host interno de Docker; para mostrar figuras
-  usa `ASSET_PUBLIC_BASE_URL` o el endpoint `/assets/{asset_id}` de la aplicación.
-  No se reescribe el host de una URL firmada después de generarla (invalidaría la firma).
+- **Rutas relativas → URLs públicas**: los modelos almacenan
+  `/buckets/{bucket}/{key}`. Para enviar la información al frontend o al cliente
+  MCP se compone la URL completa concatenando `S3_PUBLIC_BASE_URL`
+  (`build_public_url` en `core/urls.py`); en la UI también puedes usar
+  `ASSET_PUBLIC_BASE_URL`, el endpoint `/assets/{asset_id}` de la aplicación o
+  `S3_PUBLIC_ENDPOINT` (reescritura del host interno). No se reescribe el host de
+  una URL firmada después de generarla (invalidaría la firma).
 
 **Verificar el bucket (crear/leer/borrar un objeto):**
 
