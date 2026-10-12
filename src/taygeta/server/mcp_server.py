@@ -381,6 +381,12 @@ def _enrich(payload: dict[str, Any], storage: ObjectStorage) -> EnrichedQuestion
 # ---------------------------------------------------------------------------
 
 
+@mcp.custom_route("/health", methods=["GET"])
+async def health(_request: Request) -> Response:
+    """Endpoint de salud para healthchecks de Docker Compose."""
+    return JSONResponse({"status": "ok"})
+
+
 @mcp.custom_route("/download/{filename:path}", methods=["GET"])
 async def download_file(request: Request) -> Response:
     """Sirve un archivo temporal del directorio de descargas."""

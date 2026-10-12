@@ -1,0 +1,37 @@
+# syntax=docker/dockerfile:1
+#
+# Servicio OCR — variante AMD/ROCm (sección 11.3).
+# Construye `llama-server` con backend HIP. La imagen usa el runtime ROCm, que
+# debe ser compatible con la versión de ROCm instalada en el host.
+#
+# Requisitos del host:
+#   - Driver AMD + runtime ROCm compatibles con la imagen base.
+#   - Acceso a /dev/kfd y /dev/dri (lo configura docker-compose.rocm.yml).
+#   - Grupo de usuarios en video/render según la distribución del host.
+# Verificación: `docker compose -f docker-compose.yml -f docker-compose.rocm.yml \
+#   exec ocr llama-server --list-devices` (debe detectar la GPU AMD).
+
+FROM rocm/dev-ubuntu-22.04:6.2.2
+
+ARG LLAMA_CPP_REF=b11559
+# Objetivo(s) GPU a compilar. Ajusta a la arquitectura real, p. ej. gfx1100.
+ARG AMDGPU_TARGETS=gfx1030
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git cmake build-essential ca-certificates libcurl4-openssl-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+RUN git clone --depth 1 --branch "${LLAMA_CPP_REF}" https://github.com/ggml-org/llama.cpp.git .
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
+      -DGGML_CUDA=OFF -DGGML_HIP=ON \
+      -DAMDGPU_TARGETS="${AMDGPU_TARGETS}" -DLLAMA_CURL=ON \
+ && cmake --build build --config Release -j"$(nproc)" --target llama-server \
+ && install -m 0755 build/bin/llama-server /usr/local/bin/llama-server
+
+COPY docker/ocr/entrypoint.sh /usr/local/bin/ocr-entrypoint
+RUN chmod 0755 /usr/local/bin/ocr-entrypoint
+
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/ocr-entrypoint"]

@@ -1,0 +1,30 @@
+# ============================================================================
+# Taygeta — Override AMD/ROCm (sección 12.2). NO es una definición completa:
+# solo modifica el servicio `ocr` sobre el Compose base.
+#
+# Uso:
+#   docker compose -f docker-compose.yml -f docker-compose.rocm.yml up --build
+#
+# No mezclar con docker-compose.cuda.yml.
+# ============================================================================
+services:
+  ocr:
+    build:
+      context: .
+      dockerfile: docker/ocr/Dockerfile.rocm
+    image: taygeta-ocr:rocm
+    # Acceso mínimo a los dispositivos AMD (sin privileged).
+    devices:
+      - /dev/kfd
+      - /dev/dri
+    # Grupos de dispositivo habituales en el host (ajustar o eliminar si no
+    # se corresponden con la distribución del host).
+    group_add:
+      - video
+      - render
+    environment:
+      # Configurable: vaciar/eliminar si ROCm detecta la arquitectura sin override.
+      HSA_OVERRIDE_GFX_VERSION: ${HSA_OVERRIDE_GFX_VERSION:-10.3.0}
+    volumes:
+      - ocr-models:/models
+      - ocr-cache:/cache

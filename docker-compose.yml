@@ -1,0 +1,215 @@
+# ============================================================================
+# Taygeta — Compose base (sección 12.1). Neutral respecto de GPU: aquí NO se
+# declaran dispositivos, runtimes ni variables específicas de hardware. Usa la
+# variante CPU del servicio OCR, sustituible por los overrides ROCm/CUDA.
+# ============================================================================
+name: taygeta
+
+x-app-environment: &app-environment
+  DB_PATH: ${DB_PATH:-/app/data/taygeta.db}
+  DOWNLOADS_DIR: ${DOWNLOADS_DIR:-/app/downloads}
+  UPLOADS_DIR: ${UPLOADS_DIR:-/app/uploads}
+  DOWNLOADS_TTL_SECONDS: ${DOWNLOADS_TTL_SECONDS:-3600}
+  LLM_API_KEY: ${LLM_API_KEY:-}
+  LLM_BASE_URL: ${LLM_BASE_URL:-}
+  LLM_MODEL: ${LLM_MODEL:-}
+  LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-120}
+  LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-2}
+  OCR_API_KEY: ${OCR_API_KEY:-local-ocr}
+  OCR_BASE_URL: ${OCR_BASE_URL:-http://ocr:8080/v1}
+  OCR_MODEL: ${OCR_MODEL:-}
+  OCR_TIMEOUT_SECONDS: ${OCR_TIMEOUT_SECONDS:-180}
+  OCR_CONTEXT_SIZE: ${OCR_CONTEXT_SIZE:-8192}
+  S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://seaweedfs-s3:8333}
+  S3_BUCKET: ${S3_BUCKET:-taygeta-assets}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-change-me}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-change-me}
+  S3_REGION: ${S3_REGION:-us-east-1}
+  ASSET_PUBLIC_BASE_URL: ${ASSET_PUBLIC_BASE_URL:-}
+  ASSET_URL_TTL_SECONDS: ${ASSET_URL_TTL_SECONDS:-300}
+  MCP_HOST: ${MCP_HOST:-0.0.0.0}
+  MCP_PORT: ${MCP_PORT:-8000}
+  STREAMLIT_PUBLIC_URL: ${STREAMLIT_PUBLIC_URL:-http://localhost:8501}
+  DOWNLOAD_PUBLIC_URL: ${DOWNLOAD_PUBLIC_URL:-http://localhost:8000}
+
+# Volúmenes persistentes comunes a las aplicaciones (nunca assets definitivos:
+# las figuras viven en SeaweedFS).
+x-app-volumes: &app-volumes
+  - taygeta-data:/app/data
+  - taygeta-uploads:/app/uploads
+  - taygeta-downloads:/app/downloads
+
+services:
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: taygeta-app:latest
+    restart: unless-stopped
+    command: ["taygeta-server"]
+    ports:
+      - "${MCP_PORT:-8000}:${MCP_PORT:-8000}"
+    environment:
+      <<: *app-environment
+    volumes: *app-volumes
+    depends_on:
+      seaweedfs-s3:
+        condition: service_started
+      ocr:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: taygeta-app:latest
+    restart: unless-stopped
+    command:
+      - streamlit
+      - run
+      - src/taygeta/ui/app.py
+      - --server.address=0.0.0.0
+      - --server.port=8501
+      - --server.headless=true
+    ports:
+      - "8501:8501"
+    environment:
+      <<: *app-environment
+    volumes: *app-volumes
+    depends_on:
+      seaweedfs-s3:
+        condition: service_started
+      ocr:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Variante CPU neutral. Los overrides ROCm/CUDA sustituyen build/image.
+  ocr:
+    build:
+      context: .
+      dockerfile: docker/ocr/Dockerfile.cpu
+    image: taygeta-ocr:cpu
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      OCR_MODEL_PATH: ${OCR_MODEL_PATH:-/models/model.gguf}
+      OCR_MMPROJ_PATH: ${OCR_MMPROJ_PATH:-}
+      OCR_MODEL: ${OCR_MODEL:-}
+      OCR_CONTEXT_SIZE: ${OCR_CONTEXT_SIZE:-8192}
+      OCR_CONCURRENCY: ${OCR_CONCURRENCY:-1}
+      OCR_THREADS: ${OCR_THREADS:-}
+      OCR_PORT: "8080"
+      OCR_API_KEY: ${OCR_API_KEY:-local-ocr}
+    volumes:
+      - ocr-models:/models
+      - ocr-cache:/cache
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+
+  # -------------------------------------------------------------------------
+  # SeaweedFS (master + volume + filer + gateway S3)
+  # -------------------------------------------------------------------------
+  seaweedfs-master:
+    image: chrislusf/seaweedfs:4.48
+    restart: unless-stopped
+    command: ["master", "-ip=seaweedfs-master", "-port=9333", "-mdir=/data"]
+    volumes:
+      - seaweedfs-master-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:9333/cluster/status >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  seaweedfs-volume:
+    image: chrislusf/seaweedfs:4.48
+    restart: unless-stopped
+    command:
+      - volume
+      - -ip=seaweedfs-volume
+      - -port=8080
+      - -mserver=seaweedfs-master:9333
+      - -dir=/data
+      - -max=0
+    volumes:
+      - seaweedfs-volume-data:/data
+    depends_on:
+      seaweedfs-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8080/status >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  seaweedfs-filer:
+    image: chrislusf/seaweedfs:4.48
+    restart: unless-stopped
+    command:
+      - filer
+      - -ip=seaweedfs-filer
+      - -port=8888
+      - -master=seaweedfs-master:9333
+      - -defaultStoreDir=/data
+    volumes:
+      - seaweedfs-filer-data:/data
+    depends_on:
+      seaweedfs-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8888/ >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # Gateway S3 con credenciales configuradas (no lectura pública anónima).
+  # El host interno estable es seaweedfs-s3:8333.
+  seaweedfs-s3:
+    image: chrislusf/seaweedfs:4.48
+    restart: unless-stopped
+    command:
+      - s3
+      - -filer=seaweedfs-filer:8888
+      - -port=8333
+      - -config=/etc/seaweedfs/s3.json
+    expose:
+      - "8333"
+    volumes:
+      - ./docker/seaweedfs/s3.json.example:/etc/seaweedfs/s3.json:ro
+    depends_on:
+      seaweedfs-filer:
+        condition: service_healthy
+
+volumes:
+  taygeta-data:
+  taygeta-uploads:
+  taygeta-downloads:
+  ocr-models:
+  ocr-cache:
+  seaweedfs-master-data:
+  seaweedfs-volume-data:
+  seaweedfs-filer-data:
+
+networks:
+  default:
+    name: taygeta-net
+    driver: bridge

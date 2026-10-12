@@ -1,0 +1,39 @@
+# syntax=docker/dockerfile:1
+#
+# Servicio OCR — variante CPU neutral (sección 11.3).
+# Construye `llama-server` de llama.cpp sin CUDA ni HIP y lo expone como API
+# compatible con OpenAI. Los pesos NO se copian a la imagen: se montan desde el
+# volumen persistente `ocr-models`.
+
+FROM ubuntu:22.04 AS build
+
+ARG LLAMA_CPP_REF=b11559
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git cmake build-essential ca-certificates libcurl4-openssl-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+RUN git clone --depth 1 --branch "${LLAMA_CPP_REF}" https://github.com/ggml-org/llama.cpp.git .
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release \
+      -DGGML_NATIVE=OFF -DGGML_CUDA=OFF -DGGML_HIP=OFF -DLLAMA_CURL=ON \
+ && cmake --build build --config Release -j"$(nproc)" --target llama-server
+
+# ---------------------------------------------------------------------------
+FROM ubuntu:22.04 AS runtime
+
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libgomp1 libcurl4 ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /src/build/bin/llama-server /usr/local/bin/llama-server
+COPY docker/ocr/entrypoint.sh /usr/local/bin/ocr-entrypoint
+RUN chmod 0755 /usr/local/bin/ocr-entrypoint
+
+EXPOSE 8080
+
+# El modelo se carga desde el volumen persistente; sin pesos el contenedor
+# presenta un estado claro (falla con mensaje) en lugar de fingir salir sano.
+ENTRYPOINT ["/usr/local/bin/ocr-entrypoint"]

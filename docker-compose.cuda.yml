@@ -1,0 +1,33 @@
+# ============================================================================
+# Taygeta — Override NVIDIA/CUDA (sección 12.3). NO es una definición
+# completa: solo modifica el servicio `ocr` sobre el Compose base.
+#
+# Uso:
+#   docker compose -f docker-compose.yml -f docker-compose.cuda.yml up --build
+#
+# Requisitos del host:
+#   - Driver NVIDIA + NVIDIA Container Toolkit.
+#   - Compose v2 moderno con soporte de `deploy.resources.reservations.devices`.
+#   - Verificación previa:
+#       docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
+#
+# Para reservar GPUs concretas, sustituir `count: all` por `device_ids: ["0"]`
+# o usar `count: 1`.
+# No mezclar con docker-compose.rocm.yml.
+# ============================================================================
+services:
+  ocr:
+    build:
+      context: .
+      dockerfile: docker/ocr/Dockerfile.cuda
+    image: taygeta-ocr:cuda
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
