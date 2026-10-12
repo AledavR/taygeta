@@ -25,6 +25,11 @@ services:
     environment:
       # Configurable: vaciar/eliminar si ROCm detecta la arquitectura sin override.
       HSA_OVERRIDE_GFX_VERSION: ${HSA_OVERRIDE_GFX_VERSION:-10.3.0}
+      # Capas descargadas a GPU. LLAMA_ARG_N_GPU_LAYERS lo lee llama-server de
+      # forma nativa; OCR_GPU_LAYERS es el valor que consume entrypoint.sh para
+      # construir el flag explícito -ngl/--n-gpu-layers (red de seguridad).
+      LLAMA_ARG_N_GPU_LAYERS: 99
+      OCR_GPU_LAYERS: 99
     volumes:
       - ocr-models:/models
       - ocr-cache:/cache

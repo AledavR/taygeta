@@ -37,6 +37,7 @@ from taygeta.core.schema import (
     compute_canonical_hash,
     deterministic_question_id,
     normalize_slug,
+    sanitize_math_delimiters,
     slugify,
     utc_now_iso,
 )
@@ -53,9 +54,12 @@ científicos. A partir del texto transcrito por OCR, devuelve UNA lista de \
 preguntas y, en la MISMA respuesta, infiere para cada una tanto el enunciado \
 formateado como su clasificación curricular. Reglas:
 
-1. statement_raw: enunciado en Markdown/TeX ($...$ y $$...$$), conservando los \
-placeholders {{fig:N}} exactamente en su posición y asociándolos solo a las \
-figuras declaradas.
+1. statement_raw: enunciado en Markdown/TeX, conservando los placeholders \
+{{fig:N}} exactamente en su posición y asociándolos solo a las figuras \
+declaradas. Delimitadores matemáticos OBLIGATORIOS: usa EXCLUSIVAMENTE $...$ \
+para matemáticas inline y $$...$$ para matemáticas en bloque; PROHIBIDO \
+\\[...\\], \\], \\(...\\), \\( o \\), así como sus variantes escapadas \
+(reescríbelos siempre como $$...$$ o $...$ respectivamente).
 2. question_type: multiple_choice (si hay alternativas A/B/C/D...), open_ended, \
 true_false o numerical.
 3. choices: alternativas (mínimo 2 para multiple_choice).
@@ -76,9 +80,13 @@ Recibes una pregunta ya estructurada y un contexto correctivo del revisor humano
 Corrige el enunciado aplicando el contexto correctivo y, en la MISMA respuesta, \
 re-infiere la clasificación curricular completa. Reglas:
 
-1. statement_raw: corrige el enunciado en Markdown/TeX ($...$ y $$...$$) \
-aplicando el contexto correctivo, conservando los placeholders {{fig:N}} \
-exactamente en su posición y asociándolos solo a las figuras declaradas.
+1. statement_raw: corrige el enunciado en Markdown/TeX aplicando el contexto \
+correctivo, conservando los placeholders {{fig:N}} exactamente en su posición y \
+asociándolos solo a las figuras declaradas. Delimitadores matemáticos \
+OBLIGATORIOS: usa EXCLUSIVAMENTE $...$ para matemáticas inline y $$...$$ para \
+matemáticas en bloque; PROHIBIDO \\[...\\], \\], \\(...\\), \\( o \\), así como \
+sus variantes escapadas (reescríbelos siempre como $$...$$ o $...$ \
+respectivamente).
 2. question_type: multiple_choice (si hay alternativas A/B/C/D...), open_ended, \
 true_false o numerical.
 3. choices: alternativas corregidas (mínimo 2 para multiple_choice).
@@ -380,10 +388,14 @@ class Structurer:
         )
         referenced = self._referenced_figure_ids(draft)
         figures = [figure for figure in intermediate.figures if figure.id in referenced]
+        # Normaliza los delimitadores matemáticos antes de calcular el hash canónico
+        # para que enunciado y deduplicación queden coherentes (idempotente con el
+        # validador de ``QuestionRaw``).
+        statement_raw = sanitize_math_delimiters(draft.statement_raw)
         try:
             question = EnrichedQuestion(
                 id=resolved_id,
-                statement_raw=draft.statement_raw,
+                statement_raw=statement_raw,
                 question_type=draft.question_type,
                 choices=draft.choices,
                 figures=figures,
@@ -395,7 +407,7 @@ class Structurer:
                 prerequisites=draft.prerequisites,
                 source_metadata={"source_reference": intermediate.source_reference},
                 created_at=created_at or utc_now_iso(),
-                canonical_hash=compute_canonical_hash(draft.statement_raw),
+                canonical_hash=compute_canonical_hash(statement_raw),
             )
         except ValidationError as exc:
             return StructuredQuestion(

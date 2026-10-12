@@ -36,12 +36,14 @@ from taygeta.core.schema import (
     EnrichedQuestion,
     QuestionRaw,
     TranscriptionIntermediate,
+    get_public_url,
     normalize_slug,
+    sanitize_math_delimiters,
     slugify,
     utc_now_iso,
 )
 from taygeta.core.settings import Settings, get_settings
-from taygeta.core.urls import build_public_url, build_relative_path, split_asset_reference
+from taygeta.core.urls import build_relative_path, split_asset_reference
 from taygeta.ingest.image_extractor import (
     is_supported_source,
     open_document,
@@ -62,6 +64,7 @@ __all__ = [
     "main",
     "page_image_bytes",
     "persist_approved_questions",
+    "public_asset_url",
     "public_s3_url",
     "sanitize_upload_name",
     "save_upload",
@@ -82,6 +85,59 @@ def _slug_split(text: str | None) -> list[str]:
     if not text:
         return []
     return [slug for slug in (_slugify(part) for part in text.split(",")) if slug]
+
+
+# ---------------------------------------------------------------------------
+# Aislamiento del estado de staging (UUID)
+# ---------------------------------------------------------------------------
+
+#: Claves de ``st.session_state`` que contienen preguntas en staging y su origen.
+_STAGING_STATE_KEYS = ("staging_result", "processed_path", "staged_questions")
+
+#: Prefijos de los controles de revisión (widgets) asociados a cada pregunta.
+_STAGING_WIDGET_PREFIXES = (
+    "statement_",
+    "qtype_",
+    "choice_id_",
+    "choice_text_",
+    "course_",
+    "topic_",
+    "subtopic_",
+    "diff_",
+    "prereq_",
+    "new_prereq_",
+    "hint_",
+    "approve_",
+    "refine_",
+)
+
+
+def _clear_staged_questions() -> None:
+    """Destruye el estado de preguntas en staging y sus controles de la sesión.
+
+    Se invoca al detectar un cambio de documento o un nuevo ``session_id`` en la
+    URL, de modo que la revisión nunca mezcle preguntas de documentos o sesiones
+    distintas (aislamiento de UUID).
+    """
+    for key in _STAGING_STATE_KEYS:
+        st.session_state.pop(key, None)
+    for key in list(st.session_state.keys()):
+        if key.startswith(_STAGING_WIDGET_PREFIXES):
+            del st.session_state[key]
+
+
+def _guard_staging_source(source: str | None) -> None:
+    """Limpia el staging si el documento a revisar cambió respecto al anterior."""
+    if source != st.session_state.get("processed_path"):
+        _clear_staged_questions()
+
+
+def _sync_url_session() -> None:
+    """Detecta un nuevo ``session_id`` en la URL y aísla el staging previo."""
+    sid = st.query_params.get("session_id")
+    if sid != st.session_state.get("_url_session_id"):
+        _clear_staged_questions()
+        st.session_state["_url_session_id"] = sid
 
 
 # ---------------------------------------------------------------------------
@@ -168,34 +224,23 @@ def public_s3_url(url: str | None, settings: Settings) -> str:
     return url
 
 
-def asset_browser_url(
-    asset_path: str | None,
-    settings: Settings,
-    storage: ObjectStorage | None = None,
-) -> str:
-    """Devuelve una URL para abrir una figura desde el navegador del host.
+def public_asset_url(asset_path: str | None, settings: Settings) -> str:
+    """Compone la URL pública de una figura con ``get_public_url`` de schema.
 
-    Orden de preferencia: ``S3_PUBLIC_BASE_URL`` (concatenada con la ruta
-    relativa), ``ASSET_PUBLIC_BASE_URL`` (legacy), el proxy ``/assets/{key}`` de
-    la aplicación y, en último caso, la URL reescrita del endpoint interno al
-    público.
+    Convierte cualquier referencia de asset (``/buckets/{bucket}/{key}``,
+    ``s3://bucket/key`` o clave relativa) a su ruta relativa canónica y la
+    concatena con ``S3_PUBLIC_BASE_URL``. Así la UI renderiza imágenes con la URL
+    pública del host, nunca con URLs internas de Docker (p. ej.
+    ``http://seaweedfs-s3:8333``).
     """
     if not asset_path:
         return ""
-    bucket, key = split_asset_reference(asset_path, default_bucket=settings.S3_BUCKET)
-    if settings.S3_PUBLIC_BASE_URL:
-        return build_public_url(build_relative_path(bucket, key), settings)
-    if settings.ASSET_PUBLIC_BASE_URL:
-        return f"{settings.ASSET_PUBLIC_BASE_URL.rstrip('/')}/{key}"
-    proxy_base = (settings.DOWNLOAD_PUBLIC_URL or "").rstrip("/")
-    if proxy_base:
-        return f"{proxy_base}/assets/{key}"
-    if storage is not None:
-        try:
-            return public_s3_url(storage.display_url(asset_path), settings)
-        except ObjectStorageError:
-            return ""
-    return ""
+    try:
+        bucket, key = split_asset_reference(asset_path, default_bucket=settings.S3_BUCKET)
+        relative = build_relative_path(bucket, key)
+    except ValueError:
+        return ""
+    return get_public_url(relative)
 
 
 # ---------------------------------------------------------------------------
@@ -338,21 +383,15 @@ def _render_reference_image(
     shown = False
     for figure in figures:
         data = figure_bytes(storage, figure.asset_path)
+        public_url = public_asset_url(figure.asset_path, settings)
         if data:
             container.image(data, caption=f"{figure.id} — recorte (página {figure.page})")
             shown = True
-        elif figure.asset_path:
-            try:
-                container.image(
-                    storage.display_url(figure.asset_path) if storage else figure.asset_path,
-                    caption=f"{figure.id} — recorte (página {figure.page})",
-                )
-                shown = True
-            except ObjectStorageError:
-                shown = False
-        browser_url = asset_browser_url(figure.asset_path, settings, storage)
-        if browser_url:
-            container.caption(f"[Abrir {figure.id} en el navegador]({browser_url})")
+        elif public_url:
+            container.image(public_url, caption=f"{figure.id} — recorte (página {figure.page})")
+            shown = True
+        if public_url:
+            container.caption(f"[Abrir {figure.id} en el navegador]({public_url})")
     if shown or source_path is None:
         return
     pages = [0]
@@ -456,6 +495,73 @@ def _render_taxonomy_controls(
     )
 
 
+def _sync_question_widgets(index: int, staged: StagedQuestion) -> None:
+    """Sobrescribe los controles de la pregunta ``index`` con el reanálisis.
+
+    Tras ``refine_question`` el LLM devuelve, en la misma respuesta JSON, el TeX
+    corregido y la taxonomía re-inferida completa (``course``, ``topic``,
+    ``subtopic``, ``difficulty`` y ``prerequisites``). Escribimos esos valores en
+    ``st.session_state`` para que los inputs del formulario se actualicen al
+    instante, sin esperar a una edición manual.
+    """
+    question = staged.question
+    if question is None:
+        return
+    st.session_state[f"statement_{index}"] = question.statement_raw
+    st.session_state[f"qtype_{index}"] = question.question_type
+    st.session_state[f"course_{index}"] = question.course
+    st.session_state[f"topic_{index}"] = question.topic
+    st.session_state[f"subtopic_{index}"] = question.subtopic or ""
+    st.session_state[f"diff_{index}"] = int(question.difficulty)
+    st.session_state[f"prereq_{index}"] = list(question.prerequisites)
+    for key in list(st.session_state.keys()):
+        if key.startswith((f"choice_id_{index}_", f"choice_text_{index}_")):
+            del st.session_state[key]
+    for choice_index, choice in enumerate(question.choices or []):
+        st.session_state[f"choice_id_{index}_{choice_index}"] = choice.id
+        st.session_state[f"choice_text_{index}_{choice_index}"] = choice.content_raw
+
+
+def _refine_question(index: int) -> None:
+    """Callback ``on_click`` que reanaliza una pregunta y refresca el formulario.
+
+    Se ejecuta antes de que la nueva ejecución instancie los widgets, por lo que
+    puede actualizar ``st.session_state`` (incluidos los controles del
+    formulario) sin provocar ``StreamlitWidgetAlreadyInstantiatedError``. Los
+    errores se guardan en la sesión para mostrarlos en el cuerpo del script.
+    """
+    result: StagingResult | None = st.session_state.get("staging_result")
+    if result is None or not 0 <= index < len(result.questions):
+        return
+    staged = result.questions[index]
+    base = staged.question
+    if base is None:
+        return
+
+    intermediate = result.intermediate
+    if intermediate is None:
+        intermediate = TranscriptionIntermediate(
+            source_reference=result.source_reference,
+            raw_markdown=base.statement_raw,
+            pages=[],
+            figures=base.figures,
+            warnings=[],
+        )
+    hint = st.session_state.get(f"hint_{index}")
+    try:
+        refined = st.session_state["_pipeline"].refine_question(
+            intermediate, base, hints=hint or None
+        )
+    except Exception as exc:  # noqa: BLE001 - se informa en el cuerpo del script
+        st.session_state[f"_refine_error_{index}"] = str(exc)
+        return
+
+    st.session_state.pop(f"_refine_error_{index}", None)
+    result.questions[index] = refined
+    st.session_state["staging_result"] = result
+    _sync_question_widgets(index, refined)
+
+
 def _render_review(
     result: StagingResult,
     settings: Settings,
@@ -532,30 +638,19 @@ def _render_review(
                 st.markdown(new_statement)
                 _render_reference_image(source_path, staged, storage, st, settings)
 
-            hint = st.text_input(
+            st.text_input(
                 "Contexto correctivo (p. ej. «La condición ilegible es g(x) = ...»)",
                 key=f"hint_{index}",
             )
-            if st.button("Reanalizar enunciado", key=f"refine_{index}"):
-                intermediate = result.intermediate
-                if intermediate is None:
-                    intermediate = TranscriptionIntermediate(
-                        source_reference=result.source_reference,
-                        raw_markdown=base.statement_raw,
-                        pages=[],
-                        figures=base.figures,
-                        warnings=[],
-                    )
-                try:
-                    refined = st.session_state["_pipeline"].refine_question(
-                        intermediate, base, hints=hint or None
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    st.error(f"No se pudo reanalizar: {exc}")
-                else:
-                    result.questions[index] = refined
-                    st.session_state["staging_result"] = result
-                    st.rerun()
+            refine_error = st.session_state.pop(f"_refine_error_{index}", None)
+            if refine_error:
+                st.error(f"No se pudo reanalizar: {refine_error}")
+            st.button(
+                "Reanalizar enunciado",
+                key=f"refine_{index}",
+                on_click=_refine_question,
+                args=(index,),
+            )
 
             course, topic, subtopic, difficulty, prerequisites, new_prereqs = (
                 _render_taxonomy_controls(index, database, staged)
@@ -571,9 +666,11 @@ def _render_review(
                 source_metadata={"source_reference": result.source_reference},
             )
             # Reflejar la edición manual en el objeto que se usará al confirmar.
+            # ``model_copy`` no revalida: sanitiza el enunciado manual para no
+            # persistir delimitadores TeX no estándar (\[...\], \(...\)).
             approved_question = approved_question.model_copy(
                 update={
-                    "statement_raw": new_statement,
+                    "statement_raw": sanitize_math_delimiters(new_statement),
                     "question_type": qtype,
                     "choices": new_choices,
                 }
@@ -675,6 +772,7 @@ def _render_ingest_tab(
     )
     if uploaded is not None and st.button("Guardar en uploads"):
         path = save_upload(uploaded.name, uploaded.getvalue(), settings.UPLOADS_DIR)
+        _guard_staging_source(str(path))
         st.session_state["processed_path"] = str(path)
         st.success(f"Guardado en {path}")
 
@@ -697,6 +795,7 @@ def _render_ingest_tab(
                 status.update(label="La ingesta falló", state="error")
                 st.error(f"Error de ingesta: {exc}")
                 return
+            _guard_staging_source(str(selected_path))
             st.session_state["staging_result"] = result
             st.session_state["processed_path"] = str(selected_path)
             status.update(label=f"Ingesta completada: {result.status}", state="complete")
@@ -774,6 +873,7 @@ def main() -> None:
         st.error(f"No se pudieron inicializar los servicios: {exc}")
         return
     st.session_state["_pipeline"] = pipeline
+    _sync_url_session()
     _sidebar(settings, database, storage)
 
     tab_ingest, tab_bank = st.tabs(["Ingesta y revisión", "Banco de preguntas"])

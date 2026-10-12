@@ -11,7 +11,9 @@ Reglas transversales:
 * Los slugs curriculares (``course``, ``topic``, ``subtopic`` y prerrequisitos)
   se validan con la expresión regular ``^[a-z0-9_]+$`` (sin espacios).
 * Los enunciados usan Markdown con matemáticas TeX ``$...$`` y ``$$...$$`` y
-  placeholders de figura ``{{fig:N}}``.
+  placeholders de figura ``{{fig:N}}``. Los delimitadores LaTeX no canónicos
+  (``\\[...\\]`` y ``\\(...\\)``) se normalizan automáticamente con
+  :func:`sanitize_math_delimiters` al validar los esquemas.
 
 NOTA CRÍTICA: Ningún modelo admite ni almacena soluciones, claves de respuestas,
 respuestas correctas ni razonamientos que resuelvan el ejercicio. La extracción
@@ -53,6 +55,7 @@ __all__ = [
     "is_relative_asset_path",
     "new_question_id",
     "normalize_slug",
+    "sanitize_math_delimiters",
     "slugify",
     "utc_now_iso",
 ]
@@ -77,6 +80,12 @@ RELATIVE_ASSET_PREFIX = "/buckets/"
 
 _PLACEHOLDER_RE = re.compile(PLACEHOLDER_PATTERN)
 _FIGURE_ID_PATTERN = r"^fig:\d+$"
+
+#: Delimitadores TeX no estándar que emiten algunos modelos OCR/LLM y que rompen
+#: el renderizado de KaTeX/Typst: ``\[...\]`` denota display y ``\(...\)`` denota
+#: inline. Se toleran barras invertidas escapadas de más (``\\[``, ``\\]``).
+_DISPLAY_MATH_RE = re.compile(r"\\+\[(.*?)\\+\]", re.DOTALL)
+_INLINE_MATH_RE = re.compile(r"\\+\((.*?)\\+\)", re.DOTALL)
 
 #: Slug curricular validado (minúsculas, dígitos y guion bajo, sin espacios).
 Slug = Annotated[
@@ -107,6 +116,23 @@ def slugify(value: str | None) -> str:
 def normalize_slug(value: str | None, default: str = "general") -> str:
     """Normaliza un slug y devuelve ``default`` cuando queda vacío."""
     return slugify(value) or default
+
+
+def sanitize_math_delimiters(text: str) -> str:
+    """Normaliza delimitadores matemáticos TeX a ``$...$`` / ``$$...$$``.
+
+    Algunos modelos OCR/LLM emiten delimitadores LaTeX de estilo ``\\[...\\]``
+    (display) y ``\\(...\\)`` (inline), que KaTeX y Typst no interpretan igual que
+    los delimitadores canónicos del proyecto. Esta función los reescribe a
+    ``$$...$$`` y ``$...$`` respectivamente y tolera barras invertidas escapadas
+    de más (por ejemplo ``\\\\[...\\\\]``). Los enunciados sin esos patrones se
+    devuelven intactos.
+    """
+    if not text:
+        return text
+    sanitized = _DISPLAY_MATH_RE.sub(lambda match: f"$${match.group(1)}$$", text)
+    sanitized = _INLINE_MATH_RE.sub(lambda match: f"${match.group(1)}$", sanitized)
+    return sanitized
 
 
 def is_relative_asset_path(value: str | None) -> bool:
@@ -283,6 +309,12 @@ class Choice(BaseModel):
         description="Contenido Markdown de la alternativa con expresiones matemáticas TeX.",
     )
 
+    @field_validator("content_raw", mode="before")
+    @classmethod
+    def _normalize_content_math(cls, value: Any) -> Any:
+        """Normaliza los delimitadores matemáticos antes de validar la alternativa."""
+        return sanitize_math_delimiters(value) if isinstance(value, str) else value
+
 
 # ---------------------------------------------------------------------------
 # 3.3. QuestionRaw
@@ -337,6 +369,18 @@ class QuestionRaw(BaseModel):
         except (ValueError, AttributeError, TypeError) as exc:
             raise ValueError("id debe ser un UUID válido") from exc
         return value
+
+    @field_validator("statement_raw", mode="before")
+    @classmethod
+    def _normalize_statement_math(cls, value: Any) -> Any:
+        """Sanitiza los delimitadores matemáticos justo al validar/ingerir.
+
+        Se aplica antes de la validación del modelo y, por tanto, antes de
+        cualquier persistencia: todo ``statement_raw`` que entra al sistema
+        (ingesta, refinamiento, UI o base de datos) queda con ``$...$`` y
+        ``$$...$$``.
+        """
+        return sanitize_math_delimiters(value) if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def _validate_structure(self) -> QuestionRaw:

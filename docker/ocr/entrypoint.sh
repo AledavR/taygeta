@@ -26,6 +26,7 @@ PORT="${OCR_PORT:-8080}"
 CONTEXT="${OCR_CONTEXT_SIZE:-8192}"
 PARALLEL="${OCR_CONCURRENCY:-1}"
 THREADS="${OCR_THREADS:-$(nproc)}"
+GPU_LAYERS="${OCR_GPU_LAYERS:-99}"
 
 download_file() {
   # download_file <url> <destino>
@@ -86,6 +87,8 @@ args=(
   --port "${PORT}"
   --model "${MODEL_PATH}"
   --ctx-size "${CONTEXT}"
+  --n-gpu-layers "${GPU_LAYERS}"
+  --image-min-tokens 1024
   --parallel "${PARALLEL}"
   --threads "${THREADS}"
 )
@@ -94,5 +97,5 @@ if [ -n "${MMPROJ_PATH}" ]; then
   args+=(--mmproj "${MMPROJ_PATH}")
 fi
 
-echo "Iniciando OCR: modelo=${MODEL_PATH} mmproj=${MMPROJ_PATH:-<ninguno>} ctx=${CONTEXT} parallel=${PARALLEL} puerto=${PORT}"
+echo "Iniciando OCR: modelo=${MODEL_PATH} mmproj=${MMPROJ_PATH:-<ninguno>} ctx=${CONTEXT} parallel=${PARALLEL} ngl=${GPU_LAYERS} puerto=${PORT}"
 exec llama-server "${args[@]}"

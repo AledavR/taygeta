@@ -2,8 +2,8 @@
 
 Expone las herramientas FastMCP del flujo HITL y de recuperación RAG:
 
-* ``stage_exam_upload``, ``refine_staged_question``, ``confirm_staged_upload``
-  (staging asistido por chat);
+* ``stage_exam_upload`` (ingesta Headless con ``auto_commit``),
+  ``refine_staged_question``, ``confirm_staged_upload`` (staging asistido por chat);
 * ``search_questions`` y ``list_taxonomy`` (recuperación RAG y catálogo);
 * ``generate_practice_exam`` y ``get_exam_source`` (generación y compilación).
 
@@ -18,6 +18,7 @@ import json
 import logging
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -30,11 +31,12 @@ from taygeta.core.schema import (
     EnrichedQuestion,
     QuestionRaw,
     TranscriptionIntermediate,
+    sanitize_math_delimiters,
     utc_now_iso,
 )
 from taygeta.core.settings import Settings, get_settings
 from taygeta.core.urls import build_public_url, build_relative_path, split_asset_reference
-from taygeta.ingest.pipeline import IngestPipeline
+from taygeta.ingest.pipeline import IngestPipeline, StagingResult
 from taygeta.ingest.validator import STATUS_NEEDS_ATTENTION, STATUS_VALID
 from taygeta.server.db import Database
 from taygeta.server.exam_generator import ExamGenerationError, ExamGenerator
@@ -52,6 +54,9 @@ _CURRICULAR_OVERRIDES = frozenset({"course", "topic", "subtopic", "difficulty", 
 
 #: Límite máximo de resultados de búsqueda para proteger el servicio.
 _MAX_SEARCH_LIMIT = 100
+
+#: Caché temporal (en memoria) de las sesiones headless pendientes de revisión.
+_headless_cache: dict[str, dict[str, Any]] = {}
 
 _settings = get_settings()
 mcp = FastMCP("taygeta", host=_settings.MCP_HOST, port=_settings.MCP_PORT)
@@ -119,12 +124,19 @@ def _resolve_download_path(filename: str, settings: Settings) -> Path:
 
 
 def _apply_overrides(question: QuestionRaw, overrides: dict[str, Any] | None) -> QuestionRaw:
-    """Aplica únicamente los overrides manuales permitidos sobre la pregunta."""
+    """Aplica únicamente los overrides manuales permitidos sobre la pregunta.
+
+    ``model_copy`` no ejecuta los validadores de Pydantic, por lo que el enunciado
+    y las alternativas manuales se sanitizan aquí explícitamente para no
+    reintroducir delimitadores TeX no estándar (``\\[...\\]``, ``\\(...\\)``).
+    """
     if not overrides:
         return question
     updates: dict[str, Any] = {
         key: value for key, value in overrides.items() if key in _ALLOWED_OVERRIDES
     }
+    if isinstance(updates.get("statement_raw"), str):
+        updates["statement_raw"] = sanitize_math_delimiters(updates["statement_raw"])
     if "choices" in updates and updates["choices"] is not None:
         updates["choices"] = [Choice.model_validate(choice) for choice in updates["choices"]]
     return question.model_copy(update=updates)
@@ -136,29 +148,66 @@ def _apply_overrides(question: QuestionRaw, overrides: dict[str, Any] | None) ->
 
 
 @mcp.tool()
-def stage_exam_upload(file_path: str) -> str:
-    """Procesa un archivo de /app/uploads y crea una sesión de staging.
+def stage_exam_upload(file_path: str, auto_commit: bool = True) -> str:
+    """Procesa un archivo de /app/uploads con el flujo Headless.
 
-    Ejecuta el pipeline de doble pase y las dos capas de validación. Devuelve un
-    resumen con el número de preguntas, su estado y las incidencias.
+    Ejecuta el pipeline de doble pase y las dos capas de validación. Si todas las
+    preguntas son ``VALID`` y ``auto_commit`` está activo, las guarda directamente
+    en la base de datos y devuelve éxito. Si hay incidencias (``NEEDS_ATTENTION``,
+    ``ERROR`` o ``DUPLICATE``), genera una sesión, la guarda en caché temporal y
+    devuelve la URL de revisión en la UI sin escribir en la base de datos.
     """
     try:
-        settings, database, _storage, pipeline, _exams = _resources()
+        settings, database, storage, pipeline, _exams = _resources()
         path = _resolve_upload_path(file_path, settings)
-        result = pipeline.ingest(path, persist_staging=True)
-        summary = result.summary()
-        if result.status == STATUS_NEEDS_ATTENTION:
-            link = f"{settings.STREAMLIT_PUBLIC_URL.rstrip('/')}/?session={result.session_id}"
-            summary["message"] = (
-                "hay incidencias; corrígelas con refine_staged_question o en la UI: " + link
-            )
-        else:
-            summary["message"] = (
-                "todas las preguntas pasaron la validación; confírmalas con confirm_staged_upload."
-            )
-        return _json(summary)
+        result = pipeline.ingest(path, persist_staging=False)
     except Exception as exc:  # noqa: BLE001 - se informa al chat, no se oculta
         return _json({"status": "error", "message": str(exc)})
+
+    summary = result.summary()
+    problems = [
+        {
+            "id": item.question.id if item.question is not None else None,
+            "status": item.status,
+            "reasons": item.reasons,
+        }
+        for item in result.questions
+        if item.status != STATUS_VALID or item.question is None
+    ]
+
+    if auto_commit and result.status == STATUS_VALID and not problems:
+        saved, save_problems = _save_headless(result, database, storage)
+        if not save_problems:
+            return _json(
+                {
+                    "status": "ok",
+                    "auto_commit": True,
+                    "saved": saved,
+                    "total": summary["total"],
+                    "message": (
+                        f"{len(saved)} pregunta(s) guardadas automáticamente en la base de datos."
+                    ),
+                }
+            )
+        problems = save_problems
+
+    session_id = str(uuid.uuid4())
+    _headless_cache[session_id] = _staging_payload(result)
+    review_url = f"{settings.STREAMLIT_PUBLIC_URL.rstrip('/')}/?session_id={session_id}"
+    status = STATUS_NEEDS_ATTENTION if problems else result.status
+    return _json(
+        {
+            "status": status,
+            "session_id": session_id,
+            "review_url": review_url,
+            "total": summary["total"],
+            "valid": summary["valid"],
+            "needs_attention": summary["needs_attention"],
+            "problems": problems,
+            "warnings": result.warnings,
+            "message": "hay incidencias; revisa la sesión en la UI: " + review_url,
+        }
+    )
 
 
 @mcp.tool()
@@ -382,6 +431,75 @@ def _intermediate_from_session(data: dict[str, Any]) -> TranscriptionIntermediat
         figures=[],
         warnings=[],
     )
+
+
+def _staging_payload(result: StagingResult) -> dict[str, Any]:
+    """Serializa un resultado de staging para la caché temporal headless."""
+    return {
+        "source_reference": result.source_reference,
+        "status": result.status,
+        "warnings": result.warnings,
+        "intermediate": (
+            result.intermediate.model_dump() if result.intermediate is not None else None
+        ),
+        "questions": [
+            {
+                "status": item.status,
+                "reasons": item.reasons,
+                "question": item.question.model_dump() if item.question is not None else None,
+            }
+            for item in result.questions
+        ],
+    }
+
+
+def _save_headless(
+    result: StagingResult,
+    database: Database,
+    storage: ObjectStorage,
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """Persiste automáticamente las preguntas VALID de una ingesta headless.
+
+    Usa ``insert_question`` para detectar duplicados (estado ``DUPLICATE``) y
+    captura cualquier excepción como ``ERROR``. Devuelve los ids guardados y la
+    lista de incidencias.
+    """
+    saved: list[str] = []
+    problems: list[dict[str, Any]] = []
+    for item in result.questions:
+        question = item.question
+        if item.status != STATUS_VALID or question is None:
+            problems.append(
+                {
+                    "id": question.id if question is not None else None,
+                    "status": item.status,
+                    "reasons": item.reasons,
+                }
+            )
+            continue
+        try:
+            enriched = _enrich(question.model_dump(), storage)
+            if enriched is None:
+                problems.append(
+                    {
+                        "id": question.id,
+                        "status": "ERROR",
+                        "reasons": ["sin clasificación curricular"],
+                    }
+                )
+                continue
+            database.add_prerequisites(list(enriched.prerequisites))
+            outcome = database.insert_question(enriched)
+        except Exception as exc:  # noqa: BLE001
+            problems.append({"id": question.id, "status": "ERROR", "reasons": [str(exc)]})
+            continue
+        if outcome == "DUPLICATE":
+            problems.append(
+                {"id": question.id, "status": "DUPLICATE", "reasons": ["pregunta duplicada"]}
+            )
+        else:
+            saved.append(question.id)
+    return saved, problems
 
 
 def _enrich(payload: dict[str, Any], storage: ObjectStorage) -> EnrichedQuestion | None:

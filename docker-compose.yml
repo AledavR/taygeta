@@ -106,8 +106,8 @@ services:
       dockerfile: docker/ocr/Dockerfile.cpu
     image: taygeta-ocr:cpu
     restart: "on-failure:5"
-    expose:
-      - "8080"
+    ports:
+      - "8080:8080"
     environment:
       OCR_MODEL_PATH: ${OCR_MODEL_PATH:-/models/Qwen2-VL-7B-Instruct-Q4_K_M.gguf}
       OCR_MODEL_URL: ${OCR_MODEL_URL:-https://huggingface.co/bartowski/Qwen2-VL-7B-Instruct-GGUF/resolve/main/Qwen2-VL-7B-Instruct-Q4_K_M.gguf}

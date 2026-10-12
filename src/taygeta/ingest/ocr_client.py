@@ -62,8 +62,11 @@ Markdown, sin interpretar ni resolver nada. Reglas obligatorias:
 
 1. Conserva la estructura de lectura, la numeración, el texto del enunciado y \
 las alternativas exactamente como aparecen.
-2. Escribe las expresiones matemáticas con delimitadores TeX: $...$ para inline \
-y $$...$$ para display.
+2. Escribe las expresiones matemáticas con delimitadores TeX estándar \
+OBLIGATORIOS: $...$ para inline y $$...$$ para display. PROHIBIDO emitir \
+\\[...\\], \\], \\(...\\), \\( o \\), así como sus variantes escapadas; si \
+aparecen en la imagen, transcríbelos siempre como $$...$$ (bloque) o $...$ \
+(inline) respectivamente.
 3. Conserva funciones por partes, matrices, sumatorias, subíndices, \
 superíndices, fracciones, límites, integrales y operadores definidos por el autor.
 4. Usa los entornos TeX adecuados cuando correspondan a la estructura visible: \
