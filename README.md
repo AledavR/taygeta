@@ -326,7 +326,7 @@ LLM_MODEL=              # identificador del modelo elegido por el administrador
 LLM_TIMEOUT_SECONDS=120
 LLM_MAX_RETRIES=2
 LLM_EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2   # embeddings locales
-DUPLICATE_SIMILARITY_THRESHOLD=0.85          # umbral coseno (0-1) de candidato a duplicado
+DUPLICATE_SIMILARITY_THRESHOLD=0.90          # umbral coseno (0-1) de candidato a duplicado
 ```
 
 Diagnóstico:

@@ -68,7 +68,7 @@ class Settings(BaseSettings):
 
     # -- Deduplicación semántica --------------------------------------------
     DUPLICATE_SIMILARITY_THRESHOLD: float = Field(
-        default=0.85,
+        default=0.90,
         ge=0.0,
         le=1.0,
         description=(
