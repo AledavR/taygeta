@@ -2,4 +2,4 @@
 
 from __future__ import annotations
 
-__all__ = ["schema", "settings"]
+__all__ = ["schema", "settings", "transpiler"]
