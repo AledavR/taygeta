@@ -49,6 +49,7 @@ __all__ = [
     "TranscriptionIntermediate",
     "compute_canonical_hash",
     "deterministic_question_id",
+    "get_public_url",
     "is_relative_asset_path",
     "new_question_id",
     "normalize_slug",
@@ -123,16 +124,32 @@ def is_relative_asset_path(value: str | None) -> bool:
     return all(segment not in ("", ".", "..") for segment in rest.split("/"))
 
 
-def compute_canonical_hash(statement_raw: str, *, question_type: str = "") -> str:
-    """Calcula un hash canónico estable para la deduplicación futura de preguntas.
+def get_public_url(relative_path: str) -> str:
+    """Compone la URL pública concatenando ``S3_PUBLIC_BASE_URL`` con la ruta relativa.
 
-    Normaliza los espacios y saltos de línea del enunciado y, opcionalmente,
-    añade el tipo de pregunta antes de aplicar SHA-256. No usa soluciones ni
+    Las imágenes se almacenan en la base de datos como rutas relativas
+    ``/buckets/{bucket}/{key}``; esta función compone la URL completa justo en el
+    límite de salida. Si ``relative_path`` está vacío, devuelve ``""``.
+    """
+    if not relative_path:
+        return ""
+    from taygeta.core.settings import get_settings
+
+    base = (get_settings().S3_PUBLIC_BASE_URL or "").rstrip("/")
+    path = relative_path if relative_path.startswith("/") else "/" + relative_path
+    return base + path
+
+
+def compute_canonical_hash(tex_string: str) -> str:
+    """Calcula un hash canónico estable para la deduplicación de preguntas.
+
+    Limpia los espacios y saltos de línea del enunciado (colapsando cualquier
+    secuencia de espacios en blanco a un único espacio) y devuelve el hash
+    SHA-256 hexadecimal del contenido normalizado. No usa soluciones ni
     respuestas correctas: solo el contenido visible del enunciado.
     """
-    normalized = " ".join(str(statement_raw).split())
-    material = f"{question_type}|{normalized}" if question_type else normalized
-    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+    normalized = " ".join(str(tex_string).split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def new_question_id() -> str:

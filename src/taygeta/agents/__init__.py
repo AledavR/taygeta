@@ -1,5 +1,5 @@
-"""Agentes de Taygeta: enriquecimiento curricular y apoyo a la revisión."""
+"""Agentes de Taygeta: estructuración (un solo pase) y apoyo a la revisión."""
 
 from __future__ import annotations
 
-__all__ = ["enrichment"]
+__all__ = ["structurer"]

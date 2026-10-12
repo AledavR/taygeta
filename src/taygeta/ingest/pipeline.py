@@ -5,9 +5,11 @@ Flujo:
 1. **Preparación** (:mod:`image_extractor`): rasterización a 300 DPI, detección
    de figuras y recorte/almacenamiento en SeaweedFS.
 2. **Pase 1 — OCR local** (:mod:`ocr_client`): transcripción fiel a Markdown/TeX.
-3. **Pase 2 — Estructuración remota** (:class:`Structurer`): convierte el texto
-   en objetos :class:`~taygeta.core.schema.QuestionRaw` usando ``instructor`` con
-   Pydantic v2, sin resolver el ejercicio.
+3. **Estructuración en un solo pase** (:mod:`taygeta.agents.structurer`): una
+   única llamada al LLM convierte el texto en objetos
+   :class:`~taygeta.core.schema.EnrichedQuestion` (TeX formateado + ``course``,
+   ``topic``, ``subtopic``, ``difficulty`` y ``prerequisites``) usando
+   ``instructor`` con Pydantic v2, sin resolver el ejercicio.
 4. **Validación en dos capas** (:mod:`validator`): heurística local + semántica
    remota. El resultado se clasifica de forma estricta como ``VALID`` o
    ``NEEDS_ATTENTION`` y queda en staging (nunca se guarda en la base definitiva
@@ -19,22 +21,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
-from openai import OpenAI
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
-
-from taygeta.core.schema import (
-    PLACEHOLDER_PATTERN,
-    Choice,
-    FigureReference,
-    QuestionRaw,
-    TranscriptionIntermediate,
-    deterministic_question_id,
-)
+from taygeta.agents.structurer import Structurer, StructuringError
+from taygeta.core.schema import EnrichedQuestion, FigureReference, TranscriptionIntermediate
 from taygeta.core.settings import Settings, get_settings
 from taygeta.ingest.image_extractor import (
     DEFAULT_DPI,
@@ -63,206 +55,10 @@ __all__ = [
     "STATUS_VALID",
     "STATUS_NEEDS_ATTENTION",
     "IngestPipeline",
-    "QuestionDraft",
     "StagedQuestion",
     "StagingResult",
-    "StructuredQuestion",
-    "Structurer",
-    "StructuringError",
     "main",
 ]
-
-_PLACEHOLDER_RE = re.compile(PLACEHOLDER_PATTERN)
-
-_STRUCTURING_SYSTEM_PROMPT = """Eres un estructurador de preguntas de exámenes \
-científicos. Convierte el texto transcrito por OCR en una lista de preguntas \
-estructuradas. Reglas:
-
-1. Identifica los límites entre preguntas y alternativas SIN modificar su sentido.
-2. Mantén las expresiones matemáticas como texto TeX/Markdown ($...$ y $$...$$).
-3. Conserva los placeholders de figura {{fig:N}} exactamente en su posición.
-4. Asocia cada placeholder únicamente a las figuras declaradas en los metadatos.
-5. Completa question_type según el formato visible: multiple_choice (si hay \
-alternativas A/B/C/D...), open_ended, true_false o numerical.
-6. Registra las incertidumbres de lectura en notation_notes; no las resuelvas \
-inventando texto.
-7. NO resuelvas el ejercicio, NO añadas soluciones, respuestas correctas ni \
-explicaciones.
-"""
-
-
-class QuestionDraft(BaseModel):
-    """Estructura mínima que el LLM devuelve por pregunta (sin id ni figuras).
-
-    El ``id`` y la asociación de figuras se asignan localmente, de forma
-    determinista, para no depender de que el modelo genere UUIDs correctos.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    statement_raw: str = Field(..., min_length=1)
-    question_type: Literal["multiple_choice", "open_ended", "true_false", "numerical"]
-    choices: list[Choice] | None = Field(default=None)
-    notation_notes: list[str] = Field(default_factory=list)
-
-
-@dataclass(slots=True)
-class StructuredQuestion:
-    """Resultado por pregunta del Pase 2."""
-
-    question: QuestionRaw | None
-    error: str | None = None
-
-
-class StructuringError(RuntimeError):
-    """Error controlado durante la estructuración remota (Pase 2)."""
-
-
-class Structurer:
-    """Pase 2: estructura la salida del OCR en ``QuestionRaw`` usando instructor."""
-
-    def __init__(
-        self,
-        settings: Settings | None = None,
-        *,
-        client: Any | None = None,
-        model: str | None = None,
-        max_retries: int | None = None,
-    ) -> None:
-        """Crea el estructurador.
-
-        Args:
-            settings: Configuración a usar; por defecto la global.
-            client: Cliente ``instructor`` ya construido (inyectable en pruebas).
-            model: Sobrescribe ``LLM_MODEL``.
-        """
-        self.settings = settings or get_settings()
-        self._client = client
-        self._model = model
-        self._max_retries = (
-            max_retries if max_retries is not None else self.settings.LLM_MAX_RETRIES
-        )
-
-    @property
-    def model(self) -> str:
-        return self._model or self.settings.LLM_MODEL
-
-    @property
-    def client(self) -> Any:
-        if self._client is None:
-            import instructor
-
-            self._client = instructor.from_openai(self._openai_client())
-        return self._client
-
-    def _openai_client(self) -> OpenAI:
-        return OpenAI(
-            base_url=self.settings.LLM_BASE_URL,
-            api_key=self.settings.LLM_API_KEY,
-            timeout=float(self.settings.LLM_TIMEOUT_SECONDS),
-            max_retries=self._max_retries,
-        )
-
-    def structure(
-        self,
-        intermediate: TranscriptionIntermediate,
-        *,
-        hints: str | None = None,
-    ) -> list[StructuredQuestion]:
-        """Convierte la transcripción intermedia en preguntas estructuradas.
-
-        Raises:
-            StructuringError: si no hay texto, el proveedor falla o no devuelve
-                ninguna pregunta.
-        """
-        text = intermediate.raw_markdown.strip()
-        if not text:
-            raise StructuringError("no hay texto transcrito que estructurar")
-
-        messages = [
-            {"role": "system", "content": _STRUCTURING_SYSTEM_PROMPT},
-            {"role": "user", "content": self._build_user_message(intermediate, hints)},
-        ]
-        try:
-            raw = self.client.chat.completions.create(
-                model=self.model,
-                response_model=list[QuestionDraft],
-                messages=messages,
-                temperature=0.0,
-                max_retries=self._max_retries,
-            )
-        except Exception as exc:  # noqa: BLE001 - errores de proveedor y de esquema
-            raise StructuringError(f"fallo en la estructuración remota: {exc}") from exc
-
-        if raw is None:
-            drafts: list[QuestionDraft] = []
-        elif isinstance(raw, list):
-            drafts = raw
-        else:
-            drafts = list(raw)
-        if not drafts:
-            raise StructuringError("el LLM remoto no produjo ninguna pregunta")
-
-        return [self._assemble(draft, index, intermediate) for index, draft in enumerate(drafts)]
-
-    def _build_user_message(
-        self, intermediate: TranscriptionIntermediate, hints: str | None
-    ) -> str:
-        lines = ["Texto transcrito del OCR (Markdown/TeX):", "", intermediate.raw_markdown]
-        lines += [
-            "",
-            "Metadatos:",
-            f"- Origen: {intermediate.source_reference}",
-            f"- Páginas: {', '.join(str(p) for p in intermediate.pages) or '(ninguna)'}",
-        ]
-        if intermediate.figures:
-            lines.append("- Figuras disponibles:")
-            for figure in intermediate.figures:
-                ymin, xmin, ymax, xmax = figure.bbox
-                lines.append(
-                    f"  - {figure.id} (página {figure.page}, bbox [ymin={ymin}, "
-                    f"xmin={xmin}, ymax={ymax}, xmax={xmax}])"
-                )
-        if hints:
-            lines.append(f"\nContexto adicional del revisor: {hints}")
-        lines.append(
-            "\nDevuelve la lista de preguntas estructuradas, una por cada pregunta del documento."
-        )
-        return "\n".join(lines)
-
-    def _assemble(
-        self,
-        draft: QuestionDraft,
-        index: int,
-        intermediate: TranscriptionIntermediate,
-    ) -> StructuredQuestion:
-        question_id = deterministic_question_id(
-            intermediate.source_reference, *[str(page) for page in intermediate.pages], str(index)
-        )
-        referenced = self._referenced_figure_ids(draft)
-        figures = [figure for figure in intermediate.figures if figure.id in referenced]
-        try:
-            question = QuestionRaw(
-                id=question_id,
-                statement_raw=draft.statement_raw,
-                question_type=draft.question_type,
-                choices=draft.choices,
-                figures=figures,
-                notation_notes=draft.notation_notes,
-            )
-        except ValidationError as exc:
-            return StructuredQuestion(
-                question=None,
-                error=f"la pregunta {index + 1} no superó el esquema: {exc}",
-            )
-        return StructuredQuestion(question=question)
-
-    @staticmethod
-    def _referenced_figure_ids(draft: QuestionDraft) -> set[str]:
-        text = draft.statement_raw
-        if draft.choices:
-            text += "\n" + "\n".join(choice.content_raw for choice in draft.choices)
-        return {f"fig:{match}" for match in _PLACEHOLDER_RE.findall(text)}
 
 
 # ---------------------------------------------------------------------------
@@ -272,9 +68,9 @@ class Structurer:
 
 @dataclass(slots=True)
 class StagedQuestion:
-    """Pregunta clasificada tras la validación en dos capas."""
+    """Pregunta enriquecida y clasificada tras la validación en dos capas."""
 
-    question: QuestionRaw | None
+    question: EnrichedQuestion | None
     status: Literal["VALID", "NEEDS_ATTENTION"]
     reasons: list[str] = field(default_factory=list)
     local: LocalValidationResult | None = None
@@ -460,7 +256,7 @@ class IngestPipeline:
         return self._finish(result, persist_staging, session_id)
 
     def validate_question(
-        self, question: QuestionRaw, *, max_pages: int | None = None
+        self, question: EnrichedQuestion, *, max_pages: int | None = None
     ) -> StagedQuestion:
         """Ejecuta las dos capas de validación sobre una pregunta y la clasifica."""
         local = validate_local(question, max_pages=max_pages)
@@ -492,30 +288,27 @@ class IngestPipeline:
     def refine_question(
         self,
         intermediate: TranscriptionIntermediate,
-        question_index: int,
+        question: EnrichedQuestion,
         *,
         hints: str | None = None,
     ) -> StagedQuestion:
         """Reanaliza una pregunta con contexto correctivo y la revalida.
 
-        Vuelve a ejecutar el Pase 2 (instructor) sobre el texto transcrito con el
-        ``hints`` del revisor y aplica las dos capas de validación. No resuelve
-        el ejercicio.
+        Reejecuta el pase de estructuración sobre UNA sola pregunta usando el mismo
+        esquema ``QuestionDraft``: el LLM devuelve, en la misma respuesta JSON, el
+        TeX corregido y la taxonomía re-inferida completa (``course``, ``topic``,
+        ``subtopic``, ``difficulty`` y ``prerequisites``). Después aplica las dos
+        capas de validación. No resuelve el ejercicio.
         """
-        structured = self.structurer.structure(intermediate, hints=hints)
-        if question_index < 0 or question_index >= len(structured):
-            raise StructuringError(
-                f"índice de pregunta {question_index} fuera de rango (0..{len(structured) - 1})"
-            )
-        item = structured[question_index]
-        if item.question is None:
+        refined = self.structurer.refine(intermediate, question, hints=hints)
+        if refined.question is None:
             return StagedQuestion(
                 question=None,
                 status=STATUS_NEEDS_ATTENTION,
-                reasons=[item.error or "el reanálisis no produjo una pregunta válida"],
+                reasons=[refined.error or "el reanálisis no produjo una pregunta válida"],
             )
         max_pages = len(intermediate.pages) or None
-        return self.validate_question(item.question, max_pages=max_pages)
+        return self.validate_question(refined.question, max_pages=max_pages)
 
     # -- Internos -----------------------------------------------------------
     def _detect_and_store_figures(

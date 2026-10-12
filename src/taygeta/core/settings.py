@@ -121,7 +121,7 @@ class Settings(BaseSettings):
         ),
     )
     S3_PUBLIC_BASE_URL: str = Field(
-        default="",
+        default="http://localhost:8333",
         description=(
             "Base pública para componer URLs de assets a partir de rutas relativas "
             "(p. ej. https://assets.example.com). Se concatena con la ruta relativa "

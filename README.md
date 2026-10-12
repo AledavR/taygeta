@@ -52,8 +52,9 @@ Ingesta **híbrida Edge-to-Cloud** en dos pases claramente separados:
      marca [ILEGIBLE] · NO clasifica ni resuelve
      │
      ▼
-[3] Pase 2 · Estructuración remota  (ingest/pipeline.py)
-     LLM remoto + instructor + Pydantic v2 → QuestionRaw
+[3] Estructuración en un solo pase  (agents/structurer.py)
+     LLM remoto + instructor + Pydantic v2 → EnrichedQuestion
+     (TeX formateado + course/topic/subtopic + difficulty + prerequisites)
      │
      ▼
 [4] Validación en dos capas  (ingest/validator.py)
@@ -105,7 +106,8 @@ taygeta/
 ├── uv.lock
 ├── .env.example
 └── src/taygeta/
-    ├── core/     schema.py · settings.py · transpiler.py
+    ├── core/     schema.py · settings.py · urls.py · transpiler.py
+    ├── agents/   structurer.py
     ├── ingest/   image_extractor.py · ocr_client.py · validator.py · pipeline.py
     ├── server/   db.py · object_storage.py · exam_generator.py · mcp_server.py
     └── ui/       app.py
@@ -312,9 +314,10 @@ algo no se pudo leer).
 
 ## LLM remoto
 
-La estructuración (Pase 2) y la validación semántica (Capa 2) usan un LLM
-**remoto** compatible con la API de OpenAI, configurado **independientemente** del
-OCR:
+La estructuración en un solo pase (que también infiere ``course``, ``topic``,
+``subtopic``, ``difficulty`` y ``prerequisites``) y la validación semántica
+(Capa 2) usan un LLM **remoto** compatible con la API de OpenAI, configurado
+**independientemente** del OCR:
 
 ```dotenv
 LLM_API_KEY=            # SOLO la credencial (sin endpoint ni modelo)

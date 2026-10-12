@@ -26,7 +26,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from taygeta.core.schema import utc_now_iso
+from taygeta.core.schema import compute_canonical_hash, utc_now_iso
 from taygeta.core.settings import Settings, get_settings
 
 if TYPE_CHECKING:
@@ -262,14 +262,35 @@ class Database:
             ).fetchone()
         return row is not None
 
-    def insert_question(self, question: EnrichedQuestion) -> None:
-        """Inserta una pregunta nueva.
+    def insert_question(self, question: EnrichedQuestion) -> str:
+        """Inserta una pregunta nueva y devuelve el estado de la inserción.
+
+        En entorno ``local`` calcula el ``canonical_hash`` del enunciado y, si ya
+        existe una pregunta con el mismo hash en el mismo curso, bloquea la
+        inserción devolviendo ``"DUPLICATE"``. En cualquier otro caso inserta la
+        fila y devuelve ``"INSERTED"``.
 
         Raises:
             DatabaseError: si ya existe una pregunta con el mismo ``id``.
         """
+        # TODO(Capa B): sustituir la comparación exacta de ``canonical_hash`` por
+        # una búsqueda de similitud vectorial en pgvector para detectar duplicados
+        # semánticos (no solo literales) a escala de producción.
+        if self.settings.APP_ENV == "local":
+            question = question.model_copy(
+                update={"canonical_hash": compute_canonical_hash(question.statement_raw)}
+            )
         values = self._question_values(question)
         with self.connect() as connection:
+            if self.settings.APP_ENV == "local":
+                duplicate = connection.execute(
+                    "SELECT 1 FROM questions "
+                    "WHERE course = ? AND json_extract(payload_json, '$.canonical_hash') = ? "
+                    "LIMIT 1",
+                    (question.course, question.canonical_hash),
+                ).fetchone()
+                if duplicate is not None:
+                    return "DUPLICATE"
             try:
                 connection.execute(
                     "INSERT INTO questions("
@@ -279,6 +300,7 @@ class Database:
                 )
             except sqlite3.IntegrityError as exc:
                 raise DatabaseError(f"ya existe una pregunta con id {question.id!r}") from exc
+        return "INSERTED"
 
     def update_question(self, question: EnrichedQuestion) -> None:
         """Actualiza una pregunta existente y sincroniza FTS5.

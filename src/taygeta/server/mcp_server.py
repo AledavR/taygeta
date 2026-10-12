@@ -192,7 +192,16 @@ def refine_staged_question(
         }
 
         intermediate = _intermediate_from_session(data)
-        refined = pipeline.refine_question(intermediate, q_index, hints=user_hint or None)
+        current_payload = questions[q_index].get("question")
+        if current_payload is None:
+            return _json(
+                {
+                    "status": "error",
+                    "message": f"la pregunta {q_index} no tiene enunciado que reanalizar",
+                }
+            )
+        current = EnrichedQuestion.model_validate(current_payload)
+        refined = pipeline.refine_question(intermediate, current, hints=user_hint or None)
         if refined.question is not None:
             refined.question = _apply_overrides(refined.question, raw_overrides)
             refined = pipeline.validate_question(

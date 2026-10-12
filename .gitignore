@@ -36,6 +36,8 @@ build/
 !.env.example
 *.log
 ESPECIFICACION.txt
+AGENTS.md
+.opencodeignore
 
 # Herramientas y sistema
 .DS_Store

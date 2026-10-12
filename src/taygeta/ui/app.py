@@ -31,7 +31,6 @@ from typing import Any
 
 import streamlit as st
 
-from taygeta.agents.enrichment import EnrichmentError, EnrichmentResult, QuestionEnricher
 from taygeta.core.schema import (
     Choice,
     EnrichedQuestion,
@@ -313,13 +312,12 @@ def persist_approved_questions(
 
 
 @st.cache_resource
-def _resources() -> tuple[Settings, Database, ObjectStorage, IngestPipeline, QuestionEnricher]:
+def _resources() -> tuple[Settings, Database, ObjectStorage, IngestPipeline]:
     settings = get_settings()
     database = Database(settings=settings)
     storage = ObjectStorage(settings)
     pipeline = IngestPipeline(settings, storage=storage, database=database)
-    enricher = QuestionEnricher(settings)
-    return settings, database, storage, pipeline, enricher
+    return settings, database, storage, pipeline
 
 
 # ---------------------------------------------------------------------------
@@ -369,11 +367,10 @@ def _render_reference_image(
 def _taxonomy_defaults(staged: StagedQuestion) -> dict[str, Any]:
     """Valores por defecto seguros (vía ``getattr``) para la taxonomía.
 
-    El objeto en staging es habitualmente un ``QuestionRaw``, que **no** define
-    ``course``/``topic``/``subtopic``/``difficulty``/``prerequisites`` (exclusivos
-    de ``EnrichedQuestion``). Se accede con ``getattr`` para soportar ambos casos
-    sin lanzar ``AttributeError``; si la pregunta ya está enriquecida, se
-    reutilizan sus valores.
+    El objeto en staging es un :class:`EnrichedQuestion` (el estructurador infiere
+    la taxonomía en el pase único), por lo que ``course``, ``topic``, ``subtopic``,
+    ``difficulty`` y ``prerequisites`` ya vienen rellenos. Se accede con
+    ``getattr`` por robustez ante preguntas no estructuradas (``question=None``).
     """
     base = staged.question
     course = getattr(base, "course", "") or ""
@@ -399,71 +396,55 @@ def _render_taxonomy_controls(
     index: int,
     database: Database,
     staged: StagedQuestion,
-    suggestion: EnrichmentResult | None = None,
 ) -> tuple[str, str, str | None, int, list[str], list[str]]:
     """Dibuja la taxonomía y devuelve los valores elegidos.
 
-    Si se recibe una ``suggestion`` inferida por IA, se usa para **pre-rellenar**
-    los controles (curso, tema, subtema, dificultad y prerrequisitos); en caso
-    contrario se reutilizan los valores existentes de la pregunta.
+    Los controles se **pre-rellenan** con la clasificación curricular inferida
+    por el LLM en el pase único de estructuración y permanecen editables.
     """
     defaults = _taxonomy_defaults(staged)
-    suggested_course = suggestion.course if suggestion else ""
-    suggested_topic = suggestion.topic if suggestion else ""
-    suggested_subtopic = suggestion.subtopic if suggestion else None
-    suggested_difficulty = suggestion.difficulty if suggestion else None
-    suggested_prerequisites = list(suggestion.prerequisites) if suggestion else []
-
-    course_default = suggested_course or defaults["course"]
-    topic_default = suggested_topic or defaults["topic"]
-    subtopic_default = suggested_subtopic or defaults["subtopic"] or ""
-    difficulty_default = suggested_difficulty or defaults["difficulty"]
-
-    # "Generación": al aplicar una nueva sugerencia se cambian las claves de los
-    # widgets para que los nuevos valores por defecto se apliquen sin avisos de
-    # ``session_state``.
-    generation = st.session_state.get(f"taxonomy_gen_{index}", 0)
-
-    def widget_key(name: str) -> str:
-        return f"{name}_{index}_{generation}"
+    course_default = defaults["course"]
+    topic_default = defaults["topic"]
+    subtopic_default = defaults["subtopic"] or ""
+    difficulty_default = defaults["difficulty"]
 
     courses = sorted({row["slug"] for row in database.list_courses()})
     course = st.text_input(
         "Curso (slug snake_case)",
         value=course_default,
-        key=widget_key("course"),
+        key=f"course_{index}",
         help=f"Cursos existentes: {', '.join(courses) or '(ninguno)'}",
     )
     topic = st.text_input(
         "Tema (slug snake_case)",
         value=topic_default,
-        key=widget_key("topic"),
+        key=f"topic_{index}",
         help="Se crea en el catálogo al confirmar si no existe.",
     )
     subtopic_raw = st.text_input(
         "Subtema (slug snake_case, opcional)",
         value=subtopic_default,
-        key=widget_key("subtopic"),
+        key=f"subtopic_{index}",
     )
     difficulty = st.slider(
         "Dificultad (1-5, complejidad matemática)",
         min_value=1,
         max_value=5,
         value=int(difficulty_default),
-        key=widget_key("diff"),
+        key=f"diff_{index}",
     )
 
-    prereq_default = list(dict.fromkeys([*suggested_prerequisites, *defaults["prerequisites"]]))
+    prereq_default = list(dict.fromkeys(defaults["prerequisites"]))
     catalog = sorted({row["slug"] for row in database.list_prerequisites()})
     options = sorted({*catalog, *prereq_default})
     prerequisites = st.multiselect(
         "Prerrequisitos",
         options,
         default=[slug for slug in prereq_default if slug in options],
-        key=widget_key("prereq"),
+        key=f"prereq_{index}",
     )
     new_prereqs_raw = st.text_input(
-        "Nuevos prerrequisitos (separados por coma)", key=widget_key("new_prereq")
+        "Nuevos prerrequisitos (separados por coma)", key=f"new_prereq_{index}"
     )
     return (
         course,
@@ -473,33 +454,6 @@ def _render_taxonomy_controls(
         prerequisites,
         _slug_split(new_prereqs_raw),
     )
-
-
-def _apply_enrichment(index: int, suggestion: EnrichmentResult) -> None:
-    """Guarda la sugerencia y fuerza el re-prellenado de los controles."""
-    st.session_state[f"enrichment_{index}"] = suggestion
-    st.session_state[f"taxonomy_gen_{index}"] = st.session_state.get(f"taxonomy_gen_{index}", 0) + 1
-
-
-def _enrich_all(result: StagingResult) -> None:
-    """Infiere la taxonomía de todas las preguntas de la sesión de staging."""
-    enricher = st.session_state.get("_enricher")
-    if enricher is None:
-        st.error("Enriquecedor no disponible (LLM no configurado).")
-        return
-    errors: list[str] = []
-    for index, staged in enumerate(result.questions):
-        if staged.question is None:
-            continue
-        try:
-            suggestion = enricher.enrich(staged.question)
-        except EnrichmentError as exc:
-            errors.append(f"Pregunta {index + 1}: no se pudo inferir la taxonomía ({exc}).")
-            continue
-        _apply_enrichment(index, suggestion)
-    if errors:
-        st.session_state["_enrich_errors"] = errors
-    st.rerun()
 
 
 def _render_review(
@@ -521,15 +475,10 @@ def _render_review(
         joined = "\n".join(f"- {warning}" for warning in result.warnings)
         st.warning("Advertencias de OCR:\n" + joined)
 
-    for enrichment_error in st.session_state.pop("_enrich_errors", []):
-        st.warning(enrichment_error)
-
     st.caption(
-        "La taxonomía, la dificultad y los prerrequisitos pueden inferirse con IA y "
-        "luego editarse manualmente antes de confirmar."
+        "La taxonomía, la dificultad y los prerrequisitos se infirieron automáticamente "
+        "durante la estructuración; revísalos y edítalos antes de confirmar."
     )
-    if st.button("Inferir taxonomía con IA (todas las preguntas)"):
-        _enrich_all(result)
 
     approved: list[tuple[EnrichedQuestion, list[str]]] = []
 
@@ -599,7 +548,7 @@ def _render_review(
                     )
                 try:
                     refined = st.session_state["_pipeline"].refine_question(
-                        intermediate, index, hints=hint or None
+                        intermediate, base, hints=hint or None
                     )
                 except Exception as exc:  # noqa: BLE001
                     st.error(f"No se pudo reanalizar: {exc}")
@@ -608,22 +557,8 @@ def _render_review(
                     st.session_state["staging_result"] = result
                     st.rerun()
 
-            if st.button("Sugerir taxonomía con IA", key=f"enrich_{index}"):
-                enricher = st.session_state.get("_enricher")
-                if enricher is None:
-                    st.error("Enriquecedor no disponible (LLM no configurado).")
-                else:
-                    try:
-                        suggestion = enricher.enrich(base)
-                    except EnrichmentError as exc:
-                        st.error(f"No se pudo inferir la taxonomía: {exc}")
-                    else:
-                        _apply_enrichment(index, suggestion)
-                        st.rerun()
-
-            suggestion = st.session_state.get(f"enrichment_{index}")
             course, topic, subtopic, difficulty, prerequisites, new_prereqs = (
-                _render_taxonomy_controls(index, database, staged, suggestion)
+                _render_taxonomy_controls(index, database, staged)
             )
 
             approved_question = build_enriched_question(
@@ -834,12 +769,11 @@ def main() -> None:
     st.title("Taygeta — Ingesta y revisión Human-in-the-Loop")
 
     try:
-        settings, database, storage, pipeline, enricher = _resources()
+        settings, database, storage, pipeline = _resources()
     except Exception as exc:  # noqa: BLE001
         st.error(f"No se pudieron inicializar los servicios: {exc}")
         return
     st.session_state["_pipeline"] = pipeline
-    st.session_state["_enricher"] = enricher
     _sidebar(settings, database, storage)
 
     tab_ingest, tab_bank = st.tabs(["Ingesta y revisión", "Banco de preguntas"])

@@ -35,6 +35,8 @@ dev = [
     "pytest-cov>=6.0.0",
     "ruff>=0.8.0",
     "mypy>=1.13.0",
+    "pyright>=1.1.414",
+    "ruff-lsp>=0.0.62",
 ]
 
 [tool.ruff]
