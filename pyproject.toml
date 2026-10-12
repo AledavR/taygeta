@@ -11,6 +11,11 @@ dependencies = [
     "pydantic-settings>=2.6.0",
     "instructor>=1.7.0",
     "openai>=1.60.0",
+    "sentence-transformers>=3.0.0",
+    # Se declara como dependencia directa para poder forzar el índice CPU de
+    # PyTorch en [tool.uv.sources] (uv solo respeta `sources` para dependencias
+    # directas). Evita las ruedas CUDA/NVIDIA en hardware AMD.
+    "torch>=2.0.0",
     "pymupdf>=1.25.0",
     "pillow>=11.0.0",
     "streamlit>=1.40.0",
@@ -38,6 +43,20 @@ dev = [
     "pyright>=1.1.414",
     "ruff-lsp>=0.0.62",
 ]
+
+# ---------------------------------------------------------------------------
+# PyTorch para CPU (entorno AMD): la rueda genérica de PyPI arrastra grandes
+# dependencias CUDA/NVIDIA a través de sentence-transformers. Se fija un índice
+# explícito con las compilaciones +cpu, usado solo por los paquetes de PyTorch.
+# ---------------------------------------------------------------------------
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
 
 [tool.ruff]
 line-length = 100

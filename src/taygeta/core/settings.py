@@ -57,6 +57,25 @@ class Settings(BaseSettings):
     )
     LLM_TIMEOUT_SECONDS: int = Field(default=120, ge=1, description="Timeout por solicitud LLM.")
     LLM_MAX_RETRIES: int = Field(default=2, ge=0, le=10, description="Reintentos acotados del LLM.")
+    LLM_EMBEDDING_MODEL: str = Field(
+        default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
+        description=(
+            "Modelo sentence-transformers (id de Hugging Face o ruta local) para "
+            "generar embeddings de deduplicación de forma local, sin API externa. "
+            "Se recomienda un modelo multilingüe para texto en español."
+        ),
+    )
+
+    # -- Deduplicación semántica --------------------------------------------
+    DUPLICATE_SIMILARITY_THRESHOLD: float = Field(
+        default=0.85,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Umbral de similitud coseno para marcar una pregunta como candidata a "
+            "duplicado durante la ingesta."
+        ),
+    )
 
     # -- OCR local (OpenAI-compatible) --------------------------------------
     OCR_API_KEY: str = Field(
@@ -269,6 +288,8 @@ class Settings(BaseSettings):
             "llm_model": self.LLM_MODEL,
             "llm_timeout_seconds": self.LLM_TIMEOUT_SECONDS,
             "llm_max_retries": self.LLM_MAX_RETRIES,
+            "llm_embedding_model": self.LLM_EMBEDDING_MODEL,
+            "duplicate_similarity_threshold": self.DUPLICATE_SIMILARITY_THRESHOLD,
             "ocr_base_url": self.OCR_BASE_URL,
             "ocr_model": self.OCR_MODEL,
             "ocr_timeout_seconds": self.OCR_TIMEOUT_SECONDS,
