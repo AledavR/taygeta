@@ -18,7 +18,6 @@ import json
 import logging
 import threading
 import time
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -56,9 +55,6 @@ _CURRICULAR_OVERRIDES = frozenset({"course", "topic", "subtopic", "difficulty", 
 
 #: Límite máximo de resultados de búsqueda para proteger el servicio.
 _MAX_SEARCH_LIMIT = 100
-
-#: Caché temporal (en memoria) de las sesiones headless pendientes de revisión.
-_headless_cache: dict[str, dict[str, Any]] = {}
 
 _settings = get_settings()
 mcp = FastMCP("taygeta", host=_settings.MCP_HOST, port=_settings.MCP_PORT)
@@ -155,16 +151,26 @@ def stage_exam_upload(file_path: str, auto_commit: bool = True) -> str:
 
     Ejecuta el pipeline de doble pase y las dos capas de validación. Si todas las
     preguntas son ``VALID`` y ``auto_commit`` está activo, las guarda directamente
-    en la base de datos y devuelve éxito. Si hay incidencias (``NEEDS_ATTENTION``,
-    ``ERROR`` o ``DUPLICATE``), genera una sesión, la guarda en caché temporal y
-    devuelve la URL de revisión en la UI sin escribir en la base de datos.
+    en la base de datos y marca la sesión como ``CONFIRMED``. Si hay incidencias
+    (``NEEDS_ATTENTION``, ``ERROR`` o ``DUPLICATE``), persiste la sesión de staging
+    en la base de datos y devuelve su identificador y la URL de revisión, de modo
+    que ``refine_staged_question`` y ``confirm_staged_upload`` cierren el ciclo.
     """
     try:
         settings, database, storage, pipeline, _exams = _resources()
         path = _resolve_upload_path(file_path, settings)
-        result = pipeline.ingest(path, persist_staging=False)
+        result = pipeline.ingest(path, persist_staging=True)
     except Exception as exc:  # noqa: BLE001 - se informa al chat, no se oculta
         return _json({"status": "error", "message": str(exc)})
+
+    session_id = result.session_id
+    if session_id is None:
+        return _json(
+            {
+                "status": "error",
+                "message": "no se pudo persistir la sesión de staging en la base de datos",
+            }
+        )
 
     summary = result.summary()
     problems = [
@@ -182,10 +188,12 @@ def stage_exam_upload(file_path: str, auto_commit: bool = True) -> str:
             result, database, storage, DeduplicationService(database)
         )
         if not save_problems:
+            database.update_staging_session(session_id, status="CONFIRMED")
             return _json(
                 {
                     "status": "ok",
                     "auto_commit": True,
+                    "session_id": session_id,
                     "saved": saved,
                     "total": summary["total"],
                     "message": (
@@ -195,8 +203,6 @@ def stage_exam_upload(file_path: str, auto_commit: bool = True) -> str:
             )
         problems = save_problems
 
-    session_id = str(uuid.uuid4())
-    _headless_cache[session_id] = _staging_payload(result)
     review_url = f"{settings.UI_PUBLIC_URL.rstrip('/')}/?session_id={session_id}"
     status = STATUS_NEEDS_ATTENTION if problems else result.status
     return _json(
@@ -438,26 +444,6 @@ def _intermediate_from_session(data: dict[str, Any]) -> TranscriptionIntermediat
         figures=[],
         warnings=[],
     )
-
-
-def _staging_payload(result: StagingResult) -> dict[str, Any]:
-    """Serializa un resultado de staging para la caché temporal headless."""
-    return {
-        "source_reference": result.source_reference,
-        "status": result.status,
-        "warnings": result.warnings,
-        "intermediate": (
-            result.intermediate.model_dump() if result.intermediate is not None else None
-        ),
-        "questions": [
-            {
-                "status": item.status,
-                "reasons": item.reasons,
-                "question": item.question.model_dump() if item.question is not None else None,
-            }
-            for item in result.questions
-        ],
-    }
 
 
 def _save_headless(
