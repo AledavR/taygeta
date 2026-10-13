@@ -3723,6 +3723,7 @@ dependencies = [
     { name = "streamlit" },
     { name = "torch", version = "2.14.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
     { name = "torch", version = "2.14.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
+    { name = "tylax" },
 ]
 
 [package.dev-dependencies]
@@ -3749,6 +3750,7 @@ requires-dist = [
     { name = "sentence-transformers", specifier = ">=3.0.0" },
     { name = "streamlit", specifier = ">=1.40.0" },
     { name = "torch", specifier = ">=2.0.0", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "tylax", specifier = ">=0.3.8,<1" },
 ]
 
 [package.metadata.requires-dev]
@@ -4023,6 +4025,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/53/a3/1585216310e344e8102c22482f6060c7a6ea0322b63e026372e6dcefcfd6/truststore-0.10.4.tar.gz", hash = "sha256:9d91bd436463ad5e4ee4aba766628dd6cd7010cf3e2461756b3303710eebc301", size = 26169, upload-time = "2025-08-12T18:49:02.73Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/19/97/56608b2249fe206a67cd573bc93cd9896e1efb9e98bce9c163bcdc704b88/truststore-0.10.4-py3-none-any.whl", hash = "sha256:adaeaecf1cbb5f4de3b1959b42d41f6fab57b2b1666adb59e89cb0b53361d981", size = 18660, upload-time = "2025-08-12T18:49:01.46Z" },
+]
+
+[[package]]
+name = "tylax"
+version = "0.3.8"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/fb/72/acec44ead8f94c5add9e4a189c98af93d78856b216e70f67a62bfae1f473/tylax-0.3.8.tar.gz", hash = "sha256:85f60ca3a259eadd890634f071ecc5502d8ed4546dfa07b63f00b13031143e67", size = 493954, upload-time = "2026-09-14T10:33:43.158Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0f/02/ff404014569701df4f39ffdfafd5c6e434d7100f2e7c007002db156bbffe/tylax-0.3.8-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:67ea727c04186a5af5fc935e74625ed5973fb868fa840d08bc55ed4887e18b49", size = 1476497, upload-time = "2026-09-14T10:33:34.527Z" },
+    { url = "https://files.pythonhosted.org/packages/57/78/fd0f2391a146dcd97351fc1674c9e504564ecf7732ee1ec8b1cd87a20ebe/tylax-0.3.8-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:5115a2d886c31f8eecfbc54ae7fa57b502eaeeedf05b45fc6c6b30dc39886756", size = 1422277, upload-time = "2026-09-14T10:33:36.527Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/7d/09cee16411f8638e567baa214d3664a58f18ed320d2956f66346454559e3/tylax-0.3.8-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:a459be05ed8bf1fad6c7ce8021a3b2bce52a76876efc34019dd58dd1aa1a225d", size = 1459493, upload-time = "2026-09-14T10:33:38.227Z" },
+    { url = "https://files.pythonhosted.org/packages/41/ff/504f07076c0c555071a3cada6c10f2f41c3c8c2ac05bbe6e930200eb13d1/tylax-0.3.8-cp310-abi3-manylinux_2_34_x86_64.whl", hash = "sha256:5df09e9222d020b6935b87b23bd455ca599d5e04ded8806ed3cbfad2b7bc8eeb", size = 1514557, upload-time = "2026-09-14T10:33:39.943Z" },
+    { url = "https://files.pythonhosted.org/packages/01/e6/0ae84b34d1b70d26c708ec93f5015c9da15c20626985bd2bcf21fe66dbeb/tylax-0.3.8-cp310-abi3-win_amd64.whl", hash = "sha256:c7fe9eee473a3f50fb7d8c8c3f6ae64caa1da2393bb461fa36385172beea790e", size = 1468715, upload-time = "2026-09-14T10:33:41.651Z" },
 ]
 
 [[package]]

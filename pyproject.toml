@@ -21,6 +21,9 @@ dependencies = [
     "streamlit>=1.40.0",
     "pandoc>=2.4",
     "boto3>=1.35.0",
+    # Conversor LaTeX↔Typst en Rust (tylax) para las fórmulas del transpilador.
+    # Wheel abi3 (cp310+) → compatible con Python 3.11; requiere glibc >= 2.34.
+    "tylax>=0.3.8,<1",
 ]
 
 [project.scripts]
