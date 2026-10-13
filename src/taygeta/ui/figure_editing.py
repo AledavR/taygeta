@@ -23,7 +23,9 @@ from taygeta.core.schema import PLACEHOLDER_PATTERN
 
 __all__ = [
     "NORMALIZED_MAX",
+    "append_figure_placeholder",
     "bbox_to_pixel_box",
+    "next_figure_id",
     "pixel_box_to_normalized_bbox",
     "reconcile_figures_with_statement",
     "strip_figure_placeholder",
@@ -33,6 +35,9 @@ __all__ = [
 NORMALIZED_MAX = 1000
 
 _PLACEHOLDER_RE = re.compile(PLACEHOLDER_PATTERN)
+
+#: Captura el número de un identificador canónico de figura (``fig:12`` -> 12).
+_ID_NUMBER_RE = re.compile(r"^fig:(\d+)$")
 
 
 def _figure_id(figure: Mapping[str, Any] | Any) -> str:
@@ -121,6 +126,41 @@ def strip_figure_placeholder(statement: str, figure_id: str) -> str:
     """
     pattern = re.compile(r"\{\{" + re.escape(figure_id) + r"\}\}")
     return pattern.sub("", statement)
+
+
+def next_figure_id(
+    figures: Sequence[Mapping[str, Any] | Any],
+    statement: str,
+) -> str:
+    """Devuelve el siguiente identificador secuencial de figura libre.
+
+    El número se calcula a partir del conjunto de identificadores ``fig:N``
+    declarados en ``figures`` **y** de los placeholders ``{{fig:N}}`` presentes
+    en el enunciado, de modo que la figura nueva nunca colisiona ni con las
+    figuras existentes ni con un placeholder (declarado o colgante). Si no hay
+    ninguno, devuelve ``fig:1``.
+    """
+    used: set[int] = set()
+    for figure in figures:
+        match = _ID_NUMBER_RE.match(_figure_id(figure))
+        if match:
+            used.add(int(match.group(1)))
+    for token in _PLACEHOLDER_RE.findall(statement):
+        used.add(int(token))
+    return f"fig:{max(used, default=0) + 1}"
+
+
+def append_figure_placeholder(statement: str, figure_id: str) -> str:
+    """Inserta el placeholder ``{{fig:X}}`` al final de un enunciado.
+
+    Si el enunciado está vacío (o solo blancos) se devuelve únicamente el
+    placeholder; en caso contrario se añade en su propia línea, para que sea
+    fácil de localizar y mover en el editor Markdown.
+    """
+    placeholder = "{{" + figure_id + "}}"
+    if not statement or not statement.strip():
+        return placeholder
+    return f"{statement}\n{placeholder}"
 
 
 def reconcile_figures_with_statement(

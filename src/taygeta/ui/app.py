@@ -64,7 +64,9 @@ from taygeta.ingest.validator import STATUS_NEEDS_ATTENTION, STATUS_VALID
 from taygeta.server.db import Database, DatabaseError
 from taygeta.server.object_storage import ObjectStorage, ObjectStorageError
 from taygeta.ui.figure_editing import (
+    append_figure_placeholder,
     bbox_to_pixel_box,
+    next_figure_id,
     pixel_box_to_normalized_bbox,
     reconcile_figures_with_statement,
     strip_figure_placeholder,
@@ -245,6 +247,21 @@ def page_image_raster(
         return None
 
 
+def document_page_count(source_path: str | Path | None) -> int | None:
+    """Devuelve el número de páginas del documento origen, o ``None`` si es inaccesible.
+
+    Se usa para ofrecer el selector de página del recorte manual de figuras.
+    """
+    if source_path is None:
+        return None
+    try:
+        with open_document(source_path) as document:
+            return document.page_count
+    except Exception as exc:  # noqa: BLE001 - la UI nunca debe romper por el origen
+        logger.warning("no se pudo contar las páginas de %s: %s", source_path, exc)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Edición de figuras en la revisión (estado de sesión)
 # ---------------------------------------------------------------------------
@@ -376,6 +393,59 @@ def _replace_figure_crop(
         storage.put_bytes(key, png, content_type="image/png", bucket=bucket or None)
         updated.append({**figure, "bbox": list(new_bbox)})
     st.session_state[f"figures_{index}"] = updated
+
+
+def _add_new_figure(
+    index: int,
+    page_index: int,
+    new_bbox: list[int],
+    source_path: str | None,
+    storage: ObjectStorage | None,
+) -> str:
+    """Recorta, sube y registra una figura nueva en el estado de la pregunta.
+
+    Cubre los falsos negativos: el usuario recorta una región de la página
+    original y este flujo la persiste con la misma convención del pipeline
+    (``figures/{uuid}.png``), asigna el siguiente ``fig:N`` libre de la pregunta
+    y añade su placeholder al final del enunciado editado para que el usuario lo
+    mueva donde corresponda.
+
+    Raises:
+        ValueError: si no hay origen o almacenamiento disponibles.
+        ImageExtractionError: si el recorte falla.
+        ObjectStorageError: si la subida del asset falla.
+    """
+    if source_path is None:
+        raise ValueError("no hay documento de origen disponible para recortar")
+    if storage is None:
+        raise ValueError("almacenamiento no disponible para guardar la figura")
+    png = crop_figure_bytes(source_path, page_index, new_bbox, dpi=DEFAULT_DPI)
+    uri = storage.store_asset_bytes(
+        png,
+        prefix="figures",
+        asset_id=None,
+        extension=".png",
+        content_type="image/png",
+    )
+    asset_path = storage.relative_path(uri)
+
+    figures = st.session_state.get(f"figures_{index}", [])
+    statement = st.session_state.get(f"statement_{index}", "")
+    if not isinstance(statement, str):
+        statement = ""
+    figure_id = next_figure_id(list(figures), statement)
+    figures.append(
+        {
+            "id": figure_id,
+            "page": page_index,
+            "bbox": list(new_bbox),
+            "caption": None,
+            "asset_path": asset_path,
+        }
+    )
+    st.session_state[f"figures_{index}"] = figures
+    st.session_state[f"statement_{index}"] = append_figure_placeholder(statement, figure_id)
+    return figure_id
 
 
 def public_s3_url(url: str | None, settings: Settings) -> str:
@@ -618,6 +688,71 @@ def _render_figure_cropper(
             st.rerun()
 
 
+def _render_add_figure(
+    index: int,
+    source_path: str | None,
+    storage: ObjectStorage | None,
+) -> None:
+    """Permite añadir manualmente una figura omitida por el modelo (falso negativo).
+
+    El botón abre un recorte sobre la página original completa del documento;
+    al confirmar, el recorte se sube a SeaweedFS con la convención del pipeline,
+    se asigna el siguiente ``fig:N`` libre de la pregunta y se inserta su
+    placeholder al final del enunciado en el editor Markdown (refrescando la
+    vista previa). El flag ``fig_add_open_{index}`` queda abierto para poder
+    añadir varias figuras sin tener que volver a pulsar el botón.
+    """
+    open_key = f"fig_add_open_{index}"
+    if st.button("➕ Añadir nueva figura", key=f"fig_add_{index}"):
+        st.session_state[open_key] = True
+        st.rerun()
+    if not st.session_state.get(open_key, False):
+        return
+
+    page_count = document_page_count(source_path)
+    if page_count is None or page_count <= 0:
+        st.caption("No hay documento de origen para añadir figuras.")
+        return
+    default_page = 0
+    figures = st.session_state.get(f"figures_{index}", [])
+    if figures:
+        default_page = min(int(figures[0].get("page", 0)), page_count - 1)
+    page_index = st.selectbox(
+        "Página original del documento",
+        options=list(range(page_count)),
+        index=default_page,
+        key=f"fig_add_page_{index}",
+    )
+    raster = page_image_raster(source_path, page_index)
+    if raster is None:
+        st.caption("No se pudo cargar la página original para recortar.")
+        return
+    buffer = io.BytesIO(raster.png_bytes)
+    image = Image.open(buffer)
+    image.load()
+    crop_key = f"fig_add_crop_{index}_{page_index}"
+    try:
+        box = st_cropper(
+            image,
+            realtime_update=True,
+            default_coords=None,
+            return_type="box",
+            key=crop_key,
+        )
+    except Exception as exc:  # noqa: BLE001 - el cropper nunca debe romper la revisión
+        st.error(f"No se pudo inicializar el recorte: {exc}")
+        return
+    if st.button("Añadir figura", key=f"fig_add_apply_{index}"):
+        try:
+            new_bbox = pixel_box_to_normalized_bbox(box, raster.width_px, raster.height_px)
+            figure_id = _add_new_figure(index, page_index, new_bbox, source_path, storage)
+        except Exception as exc:  # noqa: BLE001 - se informa al usuario, no se oculta
+            st.error(f"No se pudo añadir la figura: {exc}")
+            return
+        st.success(f"{figure_id} añadida; su placeholder quedó al final del enunciado.")
+        st.rerun()
+
+
 def _render_figure_review(
     index: int,
     staged: StagedQuestion,
@@ -628,10 +763,12 @@ def _render_figure_review(
     """Muestra las figuras de la pregunta con borrado rápido y recorte manual.
 
     La lista de figuras del estado de sesión (``figures_{index}``) es la fuente
-    de verdad durante la revisión: refleja los borrados y recortes. Por figura
-    se muestra el recorte (bytes frescos de SeaweedFS), un botón para
+    de verdad durante la revisión: refleja los borrados, recortes y altas. Por
+    figura se muestra el recorte (bytes frescos de SeaweedFS), un botón para
     eliminarla (que limpia también su ``{{fig:N}}`` del enunciado) y un recorte
-    manual con el cropper sobre la página original del documento.
+    manual con el cropper sobre la página original del documento. Debajo, el
+    botón ``➕ Añadir nueva figura`` permite cubrir falsos negativos recortando
+    figuras que el modelo de visión omitió por completo.
     """
     question = staged.question
     figures = _figures_state(index, question.figures if question is not None else [])
@@ -655,6 +792,7 @@ def _render_figure_review(
             _remove_figure(index, figure_id)
             st.rerun()
         _render_figure_cropper(index, figure, source_path, storage)
+    _render_add_figure(index, source_path, storage)
     if shown or source_path is None:
         return
     pages = [0]

@@ -468,7 +468,11 @@ curl -fL "http://localhost:8000/download/fuente_examen_${EXAM_ID}.zip" -o fuente
    original (recorte de figura desde SeaweedFS o página rasterizada). Cada figura
    puede **eliminarse** (se limpia su `{{fig:N}}` del enunciado) o **recortarse
    manualmente** dibujando un bounding box sobre la página original; el recorte
-   se sobrescribe en SeaweedFS y la vista previa se refresca al instante.
+   se sobrescribe en SeaweedFS y la vista previa se refresca al instante. Si el
+   modelo omitió una figura real (falso negativo), **➕ Añadir nueva figura**
+   carga la página completa, permite dibujar el recuadro sobre el gráfico
+   faltante y lo guarda como el siguiente `fig:N` libre, insertando `{{fig:N}}`
+   al final del enunciado para que lo muevas a su lugar.
 4. **Edita** enunciado, tipo, alternativas, dificultad (1–5), curso/tema/subtema y
    prerrequisitos. Aporta contexto correctivo y pulsa **Reanalizar** si hace falta.
 5. **Confirma** para persistir en `taygeta.db`. La corrección manual prevalece
