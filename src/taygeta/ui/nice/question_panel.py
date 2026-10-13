@@ -13,8 +13,9 @@ El panel contiene:
   nuevo), subtema, dificultad y prerrequisitos;
 * opciones avanzadas: contexto correctivo y reanálisis del enunciado (``refine``)
   que re-escribe los controles del panel con la respuesta del LLM;
-* figuras a la derecha con vistas «Figuras» / «Página original» (radio),
+* figuras a la derecha con pestañas «Imagen original» / «Figuras nuevas»,
   borrado, recorte manual y alta de falsos negativos con el cropper de arrastre;
+  la numeración de páginas mostrada empieza en 1 (el índice interno es 0);
 * checkbox de aprobación que bloquea la persistencia si el enunciado deja
   placeholders colgantes.
 """
@@ -39,6 +40,7 @@ from taygeta.ingest.validator import STATUS_NEEDS_ATTENTION, STATUS_VALID
 from taygeta.server.db import Database
 from taygeta.server.object_storage import ObjectStorage
 from taygeta.ui.figure_editing import (
+    bbox_to_pixel_box,
     pixel_box_to_normalized_bbox,
     reconcile_figures_with_statement,
     remove_figure,
@@ -425,8 +427,10 @@ class QuestionPanel:
                     if image is not None:
                         ui.image(image).classes("w-full rounded border")
                     else:
-                        caption(f"{figure_id}: no se pudo cargar el recorte (página {page_index})")
-                    caption(f"{figure_id} — recorte (página {page_index})")
+                        caption(
+                            f"{figure_id}: no se pudo cargar el recorte (página {page_index + 1})"
+                        )
+                    caption(f"{figure_id} — recorte (página {page_index + 1})")
                     url = cache_busted_public_url(
                         figure.get("asset_path"), self.settings, seed=figure.get("bbox")
                     )
@@ -453,13 +457,32 @@ class QuestionPanel:
             image,
             width=width,
             height=height,
-            on_confirm=lambda box: pending.update(box),
-            caption=f"Arrastra sobre la página {page_index} para ajustar el recorte",
+            on_confirm=lambda box: pending.update({"bbox": box}),
+            caption=f"Arrastra sobre la página {page_index + 1} para ajustar el recorte",
+            initial_box=self._initial_pixel_box(figure, width, height),
         )
         ui.button(
             "Aplicar recorte",
             on_click=self._apply_recrop(figure_id, width, height, pending),
         ).props("dense")
+
+    @staticmethod
+    def _initial_pixel_box(
+        figure: dict[str, Any], width: int, height: int
+    ) -> dict[str, int] | None:
+        """Caja en píxeles de la BBox actual de la figura, para sembrar el cropper.
+
+        Devuelve el recuadro vigente ``{"left", "top", "width", "height"}`` o
+        ``None`` si la figura no tiene BBox válida para las dimensiones dadas.
+        """
+        bbox = figure.get("bbox")
+        if not bbox:
+            return None
+        try:
+            xl, xr, yt, yb = bbox_to_pixel_box(bbox, int(width), int(height))
+        except (ValueError, TypeError):
+            return None
+        return {"left": xl, "top": yt, "width": xr - xl, "height": yb - yt}
 
     def _apply_recrop(
         self, figure_id: str, width: int, height: int, pending: dict[str, Any]
@@ -498,7 +521,7 @@ class QuestionPanel:
             if self.qstate.figures:
                 default_page = min(int(self.qstate.figures[0].get("page", 0)), int(page_count) - 1)
             page_select = ui.select(
-                list(range(int(page_count))),
+                {index: f"Página {index + 1}" for index in range(int(page_count))},
                 value=default_page,
                 label="Página original del documento",
             )
@@ -523,7 +546,7 @@ class QuestionPanel:
                         image,
                         width=width,
                         height=height,
-                        on_confirm=lambda box: pending.update(box),
+                        on_confirm=lambda box: pending.update({"bbox": box}),
                         caption="Arrastra y suelta para seleccionar la figura",
                     )
                     ui.button("Añadir figura", on_click=self._add_figure(pending, dims)).props(
@@ -602,9 +625,9 @@ class QuestionPanel:
             data = page_image_bytes(self.source_path, page_index)
             if data:
                 ui.image(Image.open(io.BytesIO(data))).classes("w-full rounded border")
-                caption(f"Página original {page_index}")
+                caption(f"Página original {page_index + 1}")
             else:
-                caption(f"No se pudo rasterizar la página {page_index}.")
+                caption(f"No se pudo rasterizar la página {page_index + 1}.")
 
     # ------------------------------------------------------------------
     # Reanálisis del enunciado (refine)

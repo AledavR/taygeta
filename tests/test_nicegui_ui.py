@@ -58,6 +58,36 @@ class _StubStorage:
         return None
 
 
+class _FakeStorage:
+    """Almacenamiento en memoria para probar el alta/recorte de figuras sin red."""
+
+    bucket = "taygeta-assets"
+
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+
+    def get_bytes(self, key: str, bucket: str | None = None) -> bytes | None:
+        return self.objects.get(key)
+
+    def store_asset_bytes(
+        self,
+        data: bytes,
+        *,
+        prefix: str = "figures",
+        asset_id: str | None = None,
+        extension: str = ".png",
+        content_type: str | None = None,
+        metadata: dict[str, str] | None = None,
+    ) -> str:
+        key = f"{prefix}/{asset_id or uuid4().hex}{extension}"
+        self.objects[key] = data
+        return f"s3://{self.bucket}/{key}"
+
+    def relative_path(self, reference: str) -> str:
+        key = reference.split("/", 3)[3]
+        return f"/buckets/{self.bucket}/{key}"
+
+
 def _make_questions() -> list[StagedQuestion]:
     valid = EnrichedQuestion(
         id=str(uuid4()),
@@ -114,6 +144,15 @@ async def test_index_page_builds(ui_env: None, tmp_path: Path) -> None:
         await user.should_see("1. Subir documento")
         await user.should_see("2. Procesar")
         await user.should_see("3. Revisión y confirmación")
+
+        # Modo oscuro: el botón flotante alterna el estado del cliente.
+        user.find("toggle-modo-oscuro").click()
+        dark = next(
+            element
+            for element in user.find(ui.dark_mode).elements
+            if isinstance(element, ui.dark_mode)
+        )
+        assert dark.value is True
 
 
 async def test_question_panels_build_and_switch_view(ui_env: None) -> None:
@@ -194,6 +233,10 @@ async def test_add_figure_area_renders_cropper_with_real_source(
         await user.open("/")
         await user.should_see("Pregunta 1 — VALID")
 
+        # La numeración de páginas mostrada empieza en 1.
+        await user.should_see("Página original 1")
+        await user.should_not_see("Página original 0")
+
         # Cambiar a la pestaña de figuras: aquí se construía el alta de figuras.
         user.find("Figuras nuevas").click()
         await user.should_see("➕ Añadir nueva figura")
@@ -208,3 +251,67 @@ async def test_add_figure_area_renders_cropper_with_real_source(
             add_expansion.value = True
         await user.should_see("Arrastra y suelta para seleccionar la figura")
         await user.should_see("Añadir figura")
+
+
+async def test_add_figure_keeps_cropper_selection(ui_env: None, tmp_path: Path) -> None:
+    """Regresión: el recuadro se conserva al soltar y la figura se añade.
+
+    Antes, ``DragBoxCropper`` borraba el rectángulo en ``mouseup`` y el
+    ``on_confirm`` guardaba ``left/top/width/height`` en lugar de ``bbox``, de
+    modo que el alta siempre avisaba de que no había selección.
+    """
+    from nicegui.testing import user_simulation
+    from PIL import Image
+
+    settings = get_settings()
+    database = Database(settings=settings)
+    staged = _make_questions()[1]  # sin figuras: un único cropper en el panel
+    source = tmp_path / "pagina.png"
+    Image.new("RGB", (600, 800), "white").save(source)
+    storage = _FakeStorage()
+
+    def root() -> None:
+        session = SessionState()
+        session.questions = {0: QuestionState()}
+        QuestionPanel(
+            ui.column().classes("w-full"),
+            index=0,
+            staged=staged,
+            session=session,
+            source_path=str(source),
+            storage=storage,
+            settings=settings,
+            database=database,
+            pipeline=None,
+        )
+
+    async with user_simulation(root=root) as user:
+        await user.open("/")
+        await user.should_see("Pregunta 1 — NEEDS_ATTENTION")
+
+        user.find("Figuras nuevas").click()
+        await user.should_see("➕ Añadir nueva figura")
+        add_expansion = next(
+            element
+            for element in user.find("➕ Añadir nueva figura").elements
+            if isinstance(element, ui.expansion)
+        )
+        with user:
+            add_expansion.value = True
+
+        cropper_ui = user.find(ui.interactive_image)
+        cropper = next(
+            element for element in cropper_ui.elements if isinstance(element, ui.interactive_image)
+        )
+
+        def mouse(kind: str, x: int, y: int) -> None:
+            cropper_ui.trigger("mouse", {"mouse_event_type": kind, "image_x": x, "image_y": y})
+
+        mouse("mousedown", 50, 60)
+        mouse("mousemove", 250, 260)
+        mouse("mouseup", 250, 260)
+        # El recuadro sigue dibujado tras soltar el ratón.
+        assert "<rect" in cropper.content
+
+        user.find("Añadir figura").click()
+        await user.should_see("fig:1 — recorte (página 1)", retries=15)

@@ -9,8 +9,10 @@ El flujo es:
    (``run.io_bound``, sin bloquear la interfaz);
 3. revisión por pregunta: editor Markdown/TeX con previsualización, taxonomía
    con comboboxes de curso/tema (catálogo o escritura manual), figuras a la
-   derecha con vistas «Figuras» / «Página original» y cropper de arrastre, y
-   aprobación explícita antes de persistir en SQLite (``taygeta.db``).
+   derecha con pestañas «Imagen original» / «Figuras nuevas» y cropper de
+   arrastre, y aprobación explícita antes de persistir en SQLite
+   (``taygeta.db``). Un botón flotante (arriba a la derecha) alterna el modo
+   claro/oscuro y conserva la preferencia entre recargas.
 
 Se ejecuta con ``python -m taygeta.ui.nice`` o con el entry point
 ``taygeta-ui``.
@@ -291,11 +293,35 @@ def _purge_orphans(session: SessionState, confirmed_ids: set[str], storage: Obje
     session.orphans = {}
 
 
+def _dark_mode_toggle() -> None:
+    """Botón flotante (esquina superior derecha) que alterna modo claro/oscuro.
+
+    El estado se guarda en ``app.storage.user`` (cookie de sesión) para
+    conservarlo entre recargas. Requiere ``storage_secret`` en ``ui.run``.
+    """
+    stored = bool(app.storage.user.get("dark_mode", False))
+    dark = ui.dark_mode(value=stored)
+
+    def toggle() -> None:
+        dark.toggle()
+        app.storage.user["dark_mode"] = bool(dark.value)
+        button.props(f"icon={'light_mode' if dark.value else 'dark_mode'}")
+
+    button = (
+        ui.button(icon="light_mode" if stored else "dark_mode", on_click=toggle)
+        .classes("fixed top-4 right-4 z-50")
+        .props("round flat color=primary")
+    )
+    button.mark("toggle-modo-oscuro")
+    button.tooltip("Cambiar entre modo claro y oscuro")
+
+
 @ui.page("/")
 def _index_page() -> None:
     settings, database, storage, pipeline = _resources()
     session = register(ui.context.client.id)
     ui.page_title("Taygeta — Revisión HITL")
+    _dark_mode_toggle()
 
     with ui.column().classes("w-full max-w-7xl mx-auto gap-2 p-4"):
         ui.label("Taygeta — Ingesta y revisión Human-in-the-Loop").classes("text-2xl font-bold")
@@ -376,6 +402,8 @@ def main() -> None:
         show=False,
         reload=False,
         language="es",
+        # Necesario para app.storage.user (persistencia del modo oscuro).
+        storage_secret=os.getenv("TAYGETA_UI_STORAGE_SECRET", "taygeta-hitl-local"),
     )
 
 

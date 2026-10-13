@@ -148,6 +148,10 @@ class DragBoxCropper:
     coordenadas coinciden con los píxeles de la imagen). Al soltar el botón,
     invoca ``on_confirm`` con ``{"left", "top", "width", "height"}`` en píxeles
     de la imagen original (clamped a sus dimensiones).
+
+    La caja confirmada se conserva dibujada tras soltar el ratón (se guarda en
+    ``self.box``), de modo que la selección no desaparece. ``initial_box``
+    permite sembrar el cropper con la región actual de una figura.
     """
 
     def __init__(
@@ -158,12 +162,15 @@ class DragBoxCropper:
         height: int,
         on_confirm: Callable[[dict[str, int]], None],
         caption: str = "Arrastra para seleccionar la región",
+        initial_box: dict[str, int] | None = None,
     ) -> None:
         self.width = int(width)
         self.height = int(height)
         self.on_confirm = on_confirm
         self.start: tuple[int, int] | None = None
         self.current: tuple[int, int] | None = None
+        #: Última caja confirmada (o la semilla inicial); se redibuja al soltar.
+        self.box: dict[str, int] | None = initial_box
         _caption(caption)
         self.image = ui.interactive_image(
             source,
@@ -171,8 +178,7 @@ class DragBoxCropper:
             events=["mousedown", "mousemove", "mouseup"],
             cross=True,
         ).classes("w-full border border-gray-300 rounded")
-        self.image.content = ""
-        self.image.update()
+        self._refresh()
 
     def _clamped(self, x: float, y: float) -> tuple[int, int]:
         return max(0, min(int(x), self.width)), max(0, min(int(y), self.height))
@@ -181,6 +187,8 @@ class DragBoxCropper:
         if e.type == "mousedown":
             self.start = self._clamped(e.image_x, e.image_y)
             self.current = self.start
+            # Empezar un arrastre nuevo descarta la caja anterior.
+            self.box = None
         elif e.type == "mousemove" and self.start is not None:
             self.current = self._clamped(e.image_x, e.image_y)
         elif e.type == "mouseup" and self.start is not None:
@@ -188,6 +196,7 @@ class DragBoxCropper:
             self.start = None
             self.current = None
             if box is not None:
+                self.box = box
                 self.on_confirm(box)
         self._refresh()
 
@@ -203,8 +212,12 @@ class DragBoxCropper:
         return {"left": left, "top": top, "width": width, "height": height}
 
     def _refresh(self) -> None:
-        """Redibuja el overlay SVG con el recuadro actual (si hay arrastre)."""
-        box = self._box()
+        """Redibuja el overlay con el recuadro en curso o el último confirmado.
+
+        Tras ``mouseup`` se conserva ``self.box`` para que la selección siga
+        visible; un ``mousedown`` nuevo la limpia.
+        """
+        box = self._box() or self.box
         svg = ""
         if box is not None:
             svg = (
