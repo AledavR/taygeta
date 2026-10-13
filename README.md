@@ -464,17 +464,24 @@ curl -fL "http://localhost:8000/download/fuente_examen_${EXAM_ID}.zip" -o fuente
 1. **Sube** un PDF/PNG/JPG (UI o `stage_exam_upload`). Se guarda en `uploads/`.
 2. El pipeline ejecuta el doble pase y la validación en dos capas; cada pregunta
    queda en staging como `VALID` o `NEEDS_ATTENTION` (con motivo técnico).
-3. **Revisa** en la UI: enunciado Markdown renderizado en paralelo con la imagen
-   original (recorte de figura desde SeaweedFS o página rasterizada). Cada figura
-   puede **eliminarse** (se limpia su `{{fig:N}}` del enunciado) o **recortarse
-   manualmente** dibujando un bounding box sobre la página original; el recorte
-   se sobrescribe en SeaweedFS y la vista previa se refresca al instante. Si el
-   modelo omitió una figura real (falso negativo), **➕ Añadir nueva figura**
-   carga la página completa, permite dibujar el recuadro sobre el gráfico
-   faltante y lo guarda como el siguiente `fig:N` libre, insertando `{{fig:N}}`
-   al final del enunciado para que lo muevas a su lugar.
-4. **Edita** enunciado, tipo, alternativas, dificultad (1–5), curso/tema/subtema y
-   prerrequisitos. Aporta contexto correctivo y pulsa **Reanalizar** si hace falta.
+3. **Revisa** en la UI: la columna izquierda muestra el enunciado Markdown con su
+   previsualización renderizada, el tipo/alternativas y los metadatos; la
+   columna derecha se dedica a las figuras con dos pestañas, **Figuras** y
+   **Página original** (la página del documento fuente, útil para detectar
+   figuras omitidas). Cada figura puede **eliminarse** (se limpia su `{{fig:N}}`
+   del enunciado) o **recortarse manualmente** dibujando un bounding box sobre
+   la página original; el recorte se sobrescribe en SeaweedFS y la vista previa
+   se refresca al instante. Si el modelo omitió una figura real (falso
+   negativo), **➕ Añadir nueva figura** carga la página completa, permite
+   dibujar el recuadro sobre el gráfico faltante y lo guarda como el siguiente
+   `fig:N` libre, insertando `{{fig:N}}` al final del enunciado para que lo
+   muevas a su lugar.
+4. **Edita** enunciado, tipo, alternativas, dificultad (1–5) y prerrequisitos.
+   Curso y Tema son comboboxes: selecciona un slug del catálogo o usa
+   **✏️ Escribir manualmente...** para crear uno nuevo. Aporta contexto
+   correctivo y pulsa **Reanalizar** si hace falta (todo en el panel de la
+   izquierda, con **Opciones Avanzadas** para el contexto y los prerrequisitos
+   nuevos).
 5. **Confirma** para persistir en `taygeta.db`. La corrección manual prevalece
    sobre la transcripción automática.
 

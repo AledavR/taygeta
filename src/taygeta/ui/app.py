@@ -4,12 +4,14 @@ Aplicación Streamlit para revisar la ingesta híbrida:
 
 * Subida de PDF/PNG/JPG al directorio ``UPLOADS_DIR`` y procesamiento con el
   pipeline de doble pase, mostrando el estado.
-* Panel de revisión con visualización **en paralelo** del enunciado Markdown y
-  de la imagen original (recorte de figura desde SeaweedFS o página rasterizada).
+* Panel de revisión en dos columnas: enunciado Markdown con previsualización y
+  metadatos a la izquierda; figuras a la derecha con pestañas para los recortes
+  (desde SeaweedFS) y la página original del documento.
 * Estados ``VALID`` / ``NEEDS_ATTENTION`` con explicación técnica.
 * Campo de reintento con contexto correctivo que reanaliza el enunciado.
-* Edición manual del Markdown y de los campos, slider de dificultad, selectores
-  de curso/tema/subtema y multiselect de prerrequisitos con alta dinámica.
+* Edición manual del Markdown y de los campos, slider de dificultad, comboboxes
+  de curso/tema con alta manual (``✏️ Escribir manualmente...``) y multiselect de
+  prerrequisitos con alta dinámica.
 * Botón de confirmación que persiste las preguntas **aprobadas** en ``taygeta.db``
   y garantiza que las figuras estén en el bucket persistente de SeaweedFS.
 
@@ -26,7 +28,7 @@ import io
 import logging
 import re
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -92,6 +94,9 @@ __all__ = [
 UPLOAD_EXTENSIONS = ["pdf", "png", "jpg", "jpeg"]
 
 _SLUG_RE = re.compile(r"^[a-z0-9_]+$")
+
+#: Opción de los comboboxes de taxonomía que revela un ``text_input`` libre.
+_MANUAL_SLUG_OPTION = "✏️ Escribir manualmente..."
 
 #: Alias locales de los helpers compartidos de ``taygeta.core.schema``.
 _slugify = slugify
@@ -448,6 +453,38 @@ def _add_new_figure(
     return figure_id
 
 
+def _on_add_figure(
+    index: int,
+    page_index: int,
+    box: Mapping[str, int] | None,
+    width: int,
+    height: int,
+    source_path: str | None,
+    storage: ObjectStorage | None,
+) -> None:
+    """Callback ``on_click`` del botón "Añadir figura".
+
+    Se ejecuta antes de que la nueva ejecución instancie los widgets, por lo que
+    puede escribir ``statement_{index}`` en ``st.session_state`` sin provocar
+    ``StreamlitWidgetAlreadyInstantiatedError``. Convierte el recuadro en píxeles
+    del cropper a la BBox normalizada y delega en ``_add_new_figure``. Los
+    errores y el éxito se guardan en la sesión para mostrarlos en el cuerpo del
+    script: los callbacks no pueden renderizar elementos.
+    """
+    try:
+        if not isinstance(box, Mapping):
+            raise ValueError("no hay recuadro de recorte válido")
+        new_bbox = pixel_box_to_normalized_bbox(box, int(width), int(height))
+        figure_id = _add_new_figure(index, int(page_index), new_bbox, source_path, storage)
+    except Exception as exc:  # noqa: BLE001 - se informa en el cuerpo del script
+        st.session_state[f"fig_add_error_{index}"] = str(exc)
+        return
+    st.session_state.pop(f"fig_add_error_{index}", None)
+    st.session_state[f"fig_add_success_{index}"] = (
+        f"{figure_id} añadida; su placeholder quedó al final del enunciado."
+    )
+
+
 def public_s3_url(url: str | None, settings: Settings) -> str:
     """Reescribe el endpoint interno de S3 por el público de la UI.
 
@@ -709,6 +746,14 @@ def _render_add_figure(
     if not st.session_state.get(open_key, False):
         return
 
+    # Los callbacks no pueden renderizar: los mensajes se consumen aquí (una vez).
+    add_error = st.session_state.pop(f"fig_add_error_{index}", None)
+    if add_error:
+        st.error(f"No se pudo añadir la figura: {add_error}")
+    add_success = st.session_state.pop(f"fig_add_success_{index}", None)
+    if add_success:
+        st.success(add_success)
+
     page_count = document_page_count(source_path)
     if page_count is None or page_count <= 0:
         st.caption("No hay documento de origen para añadir figuras.")
@@ -742,15 +787,20 @@ def _render_add_figure(
     except Exception as exc:  # noqa: BLE001 - el cropper nunca debe romper la revisión
         st.error(f"No se pudo inicializar el recorte: {exc}")
         return
-    if st.button("Añadir figura", key=f"fig_add_apply_{index}"):
-        try:
-            new_bbox = pixel_box_to_normalized_bbox(box, raster.width_px, raster.height_px)
-            figure_id = _add_new_figure(index, page_index, new_bbox, source_path, storage)
-        except Exception as exc:  # noqa: BLE001 - se informa al usuario, no se oculta
-            st.error(f"No se pudo añadir la figura: {exc}")
-            return
-        st.success(f"{figure_id} añadida; su placeholder quedó al final del enunciado.")
-        st.rerun()
+    st.button(
+        "Añadir figura",
+        key=f"fig_add_apply_{index}",
+        on_click=_on_add_figure,
+        args=(
+            index,
+            int(page_index),
+            box,
+            int(raster.width_px),
+            int(raster.height_px),
+            source_path,
+            storage,
+        ),
+    )
 
 
 def _render_figure_review(
@@ -768,11 +818,11 @@ def _render_figure_review(
     eliminarla (que limpia también su ``{{fig:N}}`` del enunciado) y un recorte
     manual con el cropper sobre la página original del documento. Debajo, el
     botón ``➕ Añadir nueva figura`` permite cubrir falsos negativos recortando
-    figuras que el modelo de visión omitió por completo.
+    figuras que el modelo de visión omitió por completo. La página original se
+    consulta en su propia pestaña (``_render_original_pages``).
     """
     question = staged.question
     figures = _figures_state(index, question.figures if question is not None else [])
-    shown = False
     for figure in figures:
         figure_id = figure.get("id") or "fig:?"
         page_index = int(figure.get("page", 0))
@@ -782,18 +832,30 @@ def _render_figure_review(
         public_url = _cache_busted_public_url(asset_path, settings, seed=bbox)
         if data:
             st.image(data, caption=f"{figure_id} — recorte (página {page_index})")
-            shown = True
         elif public_url:
             st.image(public_url, caption=f"{figure_id} — recorte (página {page_index})")
-            shown = True
         if public_url:
             st.caption(f"[Abrir {figure_id} en el navegador]({public_url})")
-        if st.button("Eliminar figura", key=f"fig_delete_{index}_{figure_id}", type="secondary"):
-            _remove_figure(index, figure_id)
-            st.rerun()
+        st.button(
+            "Eliminar figura",
+            key=f"fig_delete_{index}_{figure_id}",
+            type="secondary",
+            on_click=_remove_figure,
+            args=(index, figure_id),
+        )
         _render_figure_cropper(index, figure, source_path, storage)
     _render_add_figure(index, source_path, storage)
-    if shown or source_path is None:
+
+
+def _render_original_pages(question: EnrichedQuestion | None, source_path: str | None) -> None:
+    """Muestra la(s) página(s) original(es) del documento en su propia pestaña.
+
+    Rasteriza las páginas referenciadas por las figuras de la pregunta (o la
+    página 0 si no hay figuras) para inspeccionar el documento fuente y detectar
+    figuras que el modelo de visión pudo omitir (falsos negativos).
+    """
+    if source_path is None:
+        st.caption("No hay documento de origen para mostrar.")
         return
     pages = [0]
     if question is not None and question.figures:
@@ -802,6 +864,8 @@ def _render_figure_review(
         data = page_image_bytes(source_path, page_index)
         if data:
             st.image(data, caption=f"Página original {page_index}")
+        else:
+            st.caption(f"No se pudo rasterizar la página {page_index}.")
 
 
 def _taxonomy_defaults(staged: StagedQuestion) -> dict[str, Any]:
@@ -832,15 +896,58 @@ def _taxonomy_defaults(staged: StagedQuestion) -> dict[str, Any]:
     }
 
 
+def _manual_combobox(
+    index: int,
+    *,
+    key: str,
+    new_key: str,
+    label: str,
+    options: list[str],
+    default: str,
+    help: str,
+) -> str:
+    """Combobox de slug: selectbox del catálogo con opción de escritura manual.
+
+    Las opciones son el catálogo vivo de la base de datos (curso o tema) más la
+    opción ``✏️ Escribir manualmente...``, que revela un ``text_input`` para crear
+    slugs nuevos. Si el valor por defecto (inferido por el LLM o reescrito tras
+    un reanálisis) no pertenece al catálogo, el selectbox se coloca en la opción
+    manual con el ``text_input`` pre-rellenado. Antes de instanciar el selectbox
+    se sanea ``st.session_state`` para que el widget nunca reciba un valor fuera
+    de opciones (evitaría ``StreamlitAPIException``).
+    """
+    all_options = [*options, _MANUAL_SLUG_OPTION]
+    current = st.session_state.get(key)
+    if current is not None and current not in all_options:
+        # Valor aún no persistido (p. ej. reanálisis): derivar a modo manual.
+        st.session_state[new_key] = current
+        st.session_state[key] = _MANUAL_SLUG_OPTION
+    if default in options:
+        selected_index = options.index(default)
+    else:
+        selected_index = len(options)
+    selected = st.selectbox(label, all_options, index=selected_index, key=key, help=help)
+    if selected != _MANUAL_SLUG_OPTION:
+        return selected
+    manual_value = st.session_state.get(new_key, "")
+    if not manual_value and default not in options:
+        manual_value = default
+    return st.text_input(f"{label} (nuevo slug)", value=manual_value, key=new_key)
+
+
 def _render_taxonomy_controls(
     index: int,
     database: Database,
     staged: StagedQuestion,
-) -> tuple[str, str, str | None, int, list[str], list[str]]:
+) -> tuple[str, str, str | None, int, list[str]]:
     """Dibuja la taxonomía y devuelve los valores elegidos.
 
-    Los controles se **pre-rellenan** con la clasificación curricular inferida
-    por el LLM en el pase único de estructuración y permanecen editables.
+    Curso y Tema usan comboboxes: un selectbox con el catálogo vivo de la base
+    de datos y la opción ``✏️ Escribir manualmente...`` para crear slugs nuevos.
+    La lista de temas depende del curso seleccionado. Los controles se
+    **pre-rellenan** con la clasificación curricular inferida por el LLM en el
+    pase único de estructuración y permanecen editables. Los prerrequisitos
+    nuevos se gestionan aparte (opciones avanzadas), por eso aquí no se devuelven.
     """
     defaults = _taxonomy_defaults(staged)
     course_default = defaults["course"]
@@ -849,18 +956,27 @@ def _render_taxonomy_controls(
     difficulty_default = defaults["difficulty"]
 
     courses = sorted({row["slug"] for row in database.list_courses()})
-    course = st.text_input(
-        "Curso (slug snake_case)",
-        value=course_default,
+    course = _manual_combobox(
+        index,
         key=f"course_{index}",
-        help=f"Cursos existentes: {', '.join(courses) or '(ninguno)'}",
+        new_key=f"course_new_{index}",
+        label="Curso",
+        options=courses,
+        default=course_default,
+        help="Curso del catálogo o escribe uno nuevo manualmente.",
     )
-    topic = st.text_input(
-        "Tema (slug snake_case)",
-        value=topic_default,
+
+    topics = sorted({row["topic_slug"] for row in database.list_topics(course)})
+    topic = _manual_combobox(
+        index,
         key=f"topic_{index}",
-        help="Se crea en el catálogo al confirmar si no existe.",
+        new_key=f"topic_new_{index}",
+        label="Tema",
+        options=topics,
+        default=topic_default,
+        help="Temas del curso seleccionado o escribe uno nuevo manualmente.",
     )
+
     subtopic_raw = st.text_input(
         "Subtema (slug snake_case, opcional)",
         value=subtopic_default,
@@ -883,16 +999,12 @@ def _render_taxonomy_controls(
         default=[slug for slug in prereq_default if slug in options],
         key=f"prereq_{index}",
     )
-    new_prereqs_raw = st.text_input(
-        "Nuevos prerrequisitos (separados por coma)", key=f"new_prereq_{index}"
-    )
     return (
         course,
         topic,
         _slugify(subtopic_raw) or None,
         difficulty,
         prerequisites,
-        _slug_split(new_prereqs_raw),
     )
 
 
@@ -1006,11 +1118,14 @@ def _render_review(
                 continue
 
             base = staged.question
-            left, right = st.columns(2)
+            left, right = st.columns([3, 2])
             with left:
                 new_statement = st.text_area(
                     "Enunciado (Markdown/TeX)", value=base.statement_raw, key=f"statement_{index}"
                 )
+                st.caption("Enunciado renderizado")
+                st.markdown(new_statement)
+
                 question_types = ["multiple_choice", "open_ended", "true_false", "numerical"]
                 qtype = st.selectbox(
                     "Tipo de pregunta",
@@ -1036,70 +1151,79 @@ def _render_review(
                     new_choices = choices
                 if base.notation_notes:
                     st.info("Notas de notación: " + "; ".join(base.notation_notes))
-            with right:
-                st.caption("Enunciado renderizado")
-                st.markdown(new_statement)
-                _render_figure_review(index, staged, source_path, storage, settings)
 
-            st.text_input(
-                "Contexto correctivo (p. ej. «La condición ilegible es g(x) = ...»)",
-                key=f"hint_{index}",
-            )
-            refine_error = st.session_state.pop(f"_refine_error_{index}", None)
-            if refine_error:
-                st.error(f"No se pudo reanalizar: {refine_error}")
-            st.button(
-                "Reanalizar enunciado",
-                key=f"refine_{index}",
-                on_click=_refine_question,
-                args=(index,),
-            )
-
-            course, topic, subtopic, difficulty, prerequisites, new_prereqs = (
-                _render_taxonomy_controls(index, database, staged)
-            )
-
-            # Reconciliar figuras editadas con el enunciado (correspondencia 1:1).
-            edited_figures = _figures_state(index, base.figures)
-            efectivas, huerfanas, colgantes = reconcile_figures_with_statement(
-                edited_figures, new_statement
-            )
-            for figure in huerfanas:
-                _register_orphan(base.id, figure.get("asset_path"))
-
-            approved_question = build_enriched_question(
-                base,
-                course=course.strip(),
-                topic=topic.strip(),
-                subtopic=subtopic,
-                difficulty=difficulty,
-                prerequisites=[*prerequisites, *new_prereqs],
-                source_metadata={"source_reference": result.source_reference},
-                figures=[FigureReference.model_validate(figure) for figure in efectivas],
-            )
-            # Reflejar la edición manual en el objeto que se usará al confirmar.
-            # ``model_copy`` no revalida: sanitiza el enunciado manual para no
-            # persistir delimitadores TeX no estándar (\[...\], \(...\)).
-            approved_question = approved_question.model_copy(
-                update={
-                    "statement_raw": sanitize_math_delimiters(new_statement),
-                    "question_type": qtype,
-                    "choices": new_choices,
-                }
-            )
-            if colgantes:
-                st.error(
-                    "El enunciado referencia placeholders sin figura declarada: "
-                    + ", ".join(sorted(colgantes))
-                    + ". Elimina el placeholder o restaura la figura para poder aprobar."
+                st.divider()
+                st.subheader("Metadatos")
+                course, topic, subtopic, difficulty, prerequisites = _render_taxonomy_controls(
+                    index, database, staged
                 )
-            approve = st.checkbox(
-                "Aprobar y guardar esta pregunta",
-                value=staged.status == STATUS_VALID and not colgantes,
-                key=f"approve_{index}",
-            )
-            if approve and not colgantes:
-                approved.append((approved_question, new_prereqs))
+                with st.expander("Opciones Avanzadas"):
+                    st.text_input(
+                        "Contexto correctivo (p. ej. «La condición ilegible es g(x) = ...»)",
+                        key=f"hint_{index}",
+                    )
+                    refine_error = st.session_state.pop(f"_refine_error_{index}", None)
+                    if refine_error:
+                        st.error(f"No se pudo reanalizar: {refine_error}")
+                    st.button(
+                        "Reanalizar enunciado",
+                        key=f"refine_{index}",
+                        on_click=_refine_question,
+                        args=(index,),
+                    )
+                    new_prereqs_raw = st.text_input(
+                        "Nuevos prerrequisitos (separados por coma)", key=f"new_prereq_{index}"
+                    )
+                    new_prereqs = _slug_split(new_prereqs_raw)
+
+                # Reconciliar figuras editadas con el enunciado (correspondencia 1:1).
+                edited_figures = _figures_state(index, base.figures)
+                efectivas, huerfanas, colgantes = reconcile_figures_with_statement(
+                    edited_figures, new_statement
+                )
+                for figure in huerfanas:
+                    _register_orphan(base.id, figure.get("asset_path"))
+
+                approved_question = build_enriched_question(
+                    base,
+                    course=course.strip(),
+                    topic=topic.strip(),
+                    subtopic=subtopic,
+                    difficulty=difficulty,
+                    prerequisites=[*prerequisites, *new_prereqs],
+                    source_metadata={"source_reference": result.source_reference},
+                    figures=[FigureReference.model_validate(figure) for figure in efectivas],
+                )
+                # Reflejar la edición manual en el objeto que se usará al confirmar.
+                # ``model_copy`` no revalida: sanitiza el enunciado manual para no
+                # persistir delimitadores TeX no estándar (\[...\], \(...\)).
+                approved_question = approved_question.model_copy(
+                    update={
+                        "statement_raw": sanitize_math_delimiters(new_statement),
+                        "question_type": qtype,
+                        "choices": new_choices,
+                    }
+                )
+                if colgantes:
+                    st.error(
+                        "El enunciado referencia placeholders sin figura declarada: "
+                        + ", ".join(sorted(colgantes))
+                        + ". Elimina el placeholder o restaura la figura para poder aprobar."
+                    )
+                approve = st.checkbox(
+                    "Aprobar y guardar esta pregunta",
+                    value=staged.status == STATUS_VALID and not colgantes,
+                    key=f"approve_{index}",
+                )
+                if approve and not colgantes:
+                    approved.append((approved_question, new_prereqs))
+            with right:
+                st.caption("Figuras de la pregunta")
+                tabs = st.tabs(["Figuras", "Página original"])
+                with tabs[0]:
+                    _render_figure_review(index, staged, source_path, storage, settings)
+                with tabs[1]:
+                    _render_original_pages(base, source_path)
 
     st.divider()
     if st.button("Confirmar y persistir preguntas aprobadas", type="primary"):
