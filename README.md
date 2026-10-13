@@ -74,8 +74,9 @@ Componentes transversales:
 
 - **Esquemas canónicos** (`core/schema.py`): `QuestionRaw`, `EnrichedQuestion`,
   `Choice`, `FigureReference`, `TranscriptionIntermediate`.
-- **Transpilador** (`core/transpiler.py`): AST de Pandoc → Typst, con exportación
-  LaTeX y compilación de validación con el CLI de Typst.
+- **Transpilador** (`core/transpiler.py`): AST de Pandoc → Typst; las fórmulas
+  TeX se delegan a **tylax** (conversor LaTeX↔Typst en Rust). Exportación LaTeX
+  y compilación de validación con el CLI de Typst.
 - **Persistencia** (`server/db.py`): SQLite + tabla virtual **FTS5** sincronizada
   por triggers; taxonomía y staging.
 - **Objetos** (`server/object_storage.py`): cliente boto3 para SeaweedFS (S3).
@@ -120,6 +121,8 @@ taygeta/
 - **Python 3.11+** y [uv](https://docs.astral.sh/uv/).
 - Para el flujo completo de compilación y OCR: **Pandoc** y **Typst** CLI
   (ya instalados y verificados en la imagen Docker).
+- Conversor TeX→Typst **tylax**: se instala automáticamente como dependencia de
+  Python (wheel nativa de Rust, `abi3`).
 - **Docker** y **Docker Compose v2** para el despliegue por contenedores.
 - GPU opcional: AMD/ROCm o NVIDIA/CUDA para acelerar el OCR local.
 
@@ -541,18 +544,18 @@ los servicios externos no desplegados):
   en altas/actualizaciones/borrados y consultas parametrizadas.
 - **Extracción**: rasterizado 300 DPI, desnormalización con padding 1.5 %, recorte
   de figuras.
-- **Transpilador**: conversión TeX→Typst de matrices `pmatrix`, `cases`, fracciones,
-  raíces, scripts y sumatorias, y **compilación real** de PDF con Typst.
+- **Transpilador**: conversión TeX→Typst delegada a **tylax** (corpus de oro de
+  fórmulas: fracciones, raíces, matrices `pmatrix`, `cases`, `aligned`, scripts,
+  sumatorias/integrales/límites) y **compilación real** de PDF con Typst.
 - **Pipeline/validación**: clasificación estricta `VALID`/`NEEDS_ATTENTION` y
   ausencia de respuestas correctas persistidas.
 - **MCP/exámenes**: generación de PDF, ZIP de fuente (Typst y LaTeX) y rutas de
   descarga; `docker compose config` para base + ROCm + CUDA.
 
-> La suite automatizada `tests/` (pytest) con estos casos, exigida por la
-> especificación, **está pendiente** de incorporar al repositorio. Hasta entonces,
-> estas comprobaciones se ejecutan como scripts de verificación en el entorno de
-> desarrollo. Los casos que dependen de GPU o de un proveedor LLM/OCR reales solo
-> pueden completarse en el host de despliegue.
+> La suite automatizada `tests/` (pytest) empieza a incorporar estos casos
+> (sanitización de delimitadores y conversión TeX→Typst con tylax). Los casos que
+> dependen de GPU o de un proveedor LLM/OCR reales solo pueden completarse en el
+> host de despliegue.
 
 ---
 
@@ -561,18 +564,18 @@ los servicios externos no desplegados):
 - **Transcripción OCR**: depende del modelo de visión local. Texto o símbolos
   ilegibles se marcan como `[ILEGIBLE]` y requieren revisión humana; no se inventa
   contenido.
-- **Conversión TeX → Typst**: cubre los constructos acordados (delimitadores
-  inline/display, `cases`, `pmatrix`/entornos matriciales, fracciones, raíces,
-  scripts, sumatorias/integrales/límites, `aligned` y `substack`). **No** garantiza
-  la traducción de macros TeX arbitrarias: ante una construcción no soportada el
-  transpilador falla de forma controlada, emite un error descriptivo y conserva el
-  original para su recuperación o exportación LaTeX.
-- **Espaciado matemático**: TeX trata cada letra como un símbolo; Typst une letras
-  adyacentes en un identificador. El transpilador inserta separadores estructurales
-  para preservar la semántica, pero casos muy específicos de espaciado pueden
-  diferir visualmente.
-- **Alineado (`aligned`)**: se aproxima concatenando celdas por fila; es una
-  conversión best-effort dentro del alcance declarado.
+- **Conversión TeX → Typst (tylax)**: cubre un amplio catálogo de símbolos y
+  macros LaTeX (~700 símbolos, `\newcommand`/`\def`, matrices, `cases`,
+  fracciones, raíces, scripts, sumatorias/integrales/límites). tylax es **no
+  estricto**: un comando desconocido se conserva como texto crudo (no lanza) y se
+  detecta en la compilación real con Typst (`unknown variable: ...`); ante un
+  LaTeX no analizable, tylax emite un marcador `/* LaTeX Error ... */` que el
+  transpilador eleva a error descriptivo conservando el original.
+- **Espaciado matemático**: tylax separa los átomos de forma estructural, pero
+  casos muy específicos de espaciado pueden diferir visualmente (p. ej.
+  `\text{...}` pierde los espacios de relleno de los extremos).
+- **Alineado (`aligned`)**: tylax emite el alineado nativo de Typst (`&`/`\`);
+  conviene revisar visualmente los casos de más de una columna.
 - **Servicios externos**: la validación semántica y la estructuración requieren un
   LLM remoto; si no está disponible, las preguntas quedan en `NEEDS_ATTENTION` con
   el motivo técnico (no se pierden).
@@ -591,7 +594,8 @@ los servicios externos no desplegados):
 - **Rutas**: las entradas de MCP (archivos de entrada) y las descargas validan que
   la ruta permanezca dentro del directorio permitido (anti-traversal).
 - **Procesos**: se invocan `pandoc` y `typst` con argumentos en lista, nunca con
-  `shell=True`.
+  `shell=True`; la conversión TeX→Typst corre **en proceso** con `tylax`
+  (librería Rust nativa, sin subprocesos adicionales).
 - **Secretos**: `LLM_API_KEY`, credenciales S3 y tokens nunca se imprimen en logs;
   usa `Settings.safe_summary()` (enmascara secretos) para diagnósticos.
 - **Sin soluciones**: no se almacenan respuestas correctas en la base de datos,
