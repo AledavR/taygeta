@@ -7,8 +7,9 @@ Diseño (sin sustituciones globales por regex):
 * ``_render_blocks`` / ``_render_inlines`` recorren recursivamente los nodos de
   bloque e inline conservando la estructura semántica.
 * Los nodos ``Math`` (``InlineMath``/``DisplayMath``) se procesan con
-  :class:`MathConverter`, un conversor TeX→Typst **sensible a tokens y llaves**
-  (análisis sintáctico recursivo, no reemplazos por regex).
+  :class:`MathConverter`, una fachada sobre **tylax** (conversor LaTeX↔Typst
+  escrito en Rust): cada fórmula TeX se delega a ``tylax.latex_to_typst`` con
+  ``frac_to_slash=False`` y ``non_strict=True``.
 * Los placeholders ``{{fig:N}}`` se detectan con un escáner manual (no regex) y
   se convierten en bloques ``#figure(image("assets/...", width: 80%))``.
 * La exportación a LaTeX usa Pandoc (``--to latex``) y ``\\includegraphics``
@@ -16,8 +17,14 @@ Diseño (sin sustituciones globales por regex):
 * ``compile_typst`` / ``validate_typst`` ejecutan el binario ``typst`` en modo
   real de compilación y devuelven los errores con contexto.
 
-Los constructos no soportados producen :class:`TranspileError` descriptivo y
-conservan el TeX original para recuperación o exportación LaTeX.
+Nota sobre el manejo de errores: tylax **no lanza** ante comandos TeX
+desconocidos; con ``non_strict=True`` los conserva como texto crudo (en modo
+estricto los elimina en silencio), de modo que un comando desconocido se
+detecta en la compilación real con Typst (``unknown variable: ...``) y un
+examen roto nunca genera un PDF sin aviso. Un LaTeX que tylax no puede analizar
+produce el marcador ``/* LaTeX Error ... */``, que
+:meth:`MathConverter.convert` eleva a :class:`TranspileError` conservando el
+TeX original para recuperación o exportación LaTeX.
 """
 
 from __future__ import annotations
@@ -30,6 +37,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import tylax
 
 from taygeta.core.schema import sanitize_math_delimiters, sanitize_norm_bars
 
@@ -98,547 +107,51 @@ def pandoc_to_ast(markdown: str, *, pandoc_bin: str = "pandoc") -> dict[str, Any
 
 
 # ---------------------------------------------------------------------------
-# Conversor TeX → Typst (sensible a tokens y llaves)
+# Conversor TeX → Typst (delegado a tylax)
 # ---------------------------------------------------------------------------
 
 
-#: Comandos de espaciado fino que no alteran la semántica (se descartan).
-_SPACING = frozenset({",", ";", ":", "!", " ", "~"})
+#: Opciones fijas de conversión para las fórmulas del banco.
+#:
+#: * ``frac_to_slash=False`` mantiene ``frac(a, b)`` (estilo del conversor
+#:   anterior) en lugar del atajo ``a/b``.
+#: * ``non_strict=True`` (valor por defecto de tylax) conserva los comandos
+#:   desconocidos como texto crudo en vez de eliminarlos en silencio: así el
+#:   ``typst compile`` final los detecta y un enunciado roto nunca genera un
+#:   PDF sin aviso (invariante del dominio).
+_L2T_OPTIONS = tylax.L2TOptions(frac_to_slash=False, non_strict=True)
 
-#: Comandos transparentes de tamaño de delimitador (Typst los auto-dimensiona).
-_TRANSPARENT = frozenset(
-    {"left", "right", "middle", "big", "Big", "bigg", "Bigg", "bigl", "bigr", "Bigl", "Bigr"}
-)
-
-#: Caracteres escapados con barra invertida.
-_ESCAPED = {"%": "%", "$": "$", "#": "#", "&": "&", "{": "{", "}": "}"}
-
-#: Letras griegas y sus nombres en Typst.
-_GREEK = {
-    "alpha": "alpha",
-    "beta": "beta",
-    "gamma": "gamma",
-    "delta": "delta",
-    "epsilon": "epsilon",
-    "varepsilon": "epsilon",
-    "zeta": "zeta",
-    "eta": "eta",
-    "theta": "theta",
-    "vartheta": "theta",
-    "iota": "iota",
-    "kappa": "kappa",
-    "lambda": "lambda",
-    "mu": "mu",
-    "nu": "nu",
-    "xi": "xi",
-    "omicron": "omicron",
-    "pi": "pi",
-    "varpi": "pi",
-    "rho": "rho",
-    "varrho": "rho",
-    "sigma": "sigma",
-    "varsigma": "sigma",
-    "tau": "tau",
-    "upsilon": "upsilon",
-    "phi": "phi",
-    "varphi": "phi",
-    "chi": "chi",
-    "psi": "psi",
-    "omega": "omega",
-    "Gamma": "Gamma",
-    "Delta": "Delta",
-    "Theta": "Theta",
-    "Lambda": "Lambda",
-    "Xi": "Xi",
-    "Pi": "Pi",
-    "Sigma": "Sigma",
-    "Upsilon": "Upsilon",
-    "Phi": "Phi",
-    "Psi": "Psi",
-    "Omega": "Omega",
-}
-
-#: Símbolos y relaciones usuales.
-_SYMBOLS = {
-    "infty": "infinity",
-    "to": "->",
-    "rightarrow": "->",
-    "leftarrow": "<-",
-    "gets": "<-",
-    "cdot": "dot.op",
-    "times": "times",
-    "ast": "ast",
-    "pm": "plus.minus",
-    "mp": "minus.plus",
-    "le": "<=",
-    "leq": "<=",
-    "ge": ">=",
-    "geq": ">=",
-    "ne": "!=",
-    "neq": "!=",
-    "approx": "approx",
-    "equiv": "equiv",
-    "sim": "tilde.op",
-    "cong": "tilde.equiv",
-    "propto": "prop",
-    "partial": "diff",
-    "nabla": "nabla",
-    "in": "in",
-    "ni": "in",
-    "notin": "not in",
-    "cup": "union",
-    "cap": "inter",
-    "subseteq": "subset.eq",
-    "subset": "subset",
-    "supset": "supset",
-    "supseteq": "supset.eq",
-    "emptyset": "emptyset",
-    "varnothing": "emptyset",
-    "forall": "forall",
-    "exists": "exists",
-    "neg": "not",
-    "land": "and",
-    "wedge": "and",
-    "lor": "or",
-    "vee": "or",
-    "implies": "==>",
-    "iff": "<=>",
-    "Rightarrow": "=>",
-    "Leftrightarrow": "<=>",
-    "mid": "|",
-    "colon": ":",
-}
-
-#: Operadores y funciones que no consumen argumentos (sus scripts se adjuntan).
-_OPERATORS = {
-    "sum": "sum",
-    "prod": "prod",
-    "int": "integral",
-    "iint": "integral.double",
-    "iiint": "integral.triple",
-    "oint": "integral.cont",
-    "lim": "lim",
-    "limsup": "limsup",
-    "liminf": "liminf",
-    "sin": "sin",
-    "cos": "cos",
-    "tan": "tan",
-    "cot": "cot",
-    "sec": "sec",
-    "csc": "csc",
-    "arcsin": "arcsin",
-    "arccos": "arccos",
-    "arctan": "arctan",
-    "sinh": "sinh",
-    "cosh": "cosh",
-    "tanh": "tanh",
-    "log": "log",
-    "ln": "ln",
-    "lg": "lg",
-    "exp": "exp",
-    "min": "min",
-    "max": "max",
-    "det": "det",
-    "gcd": "gcd",
-    "deg": "deg",
-    "sup": "sup",
-    "inf": "inf",
-    "arg": "arg",
-    "dim": "dim",
-    "ker": "ker",
-    "Pr": "Pr",
-}
-
-#: Comandos de estilo/ornamento que aplican a un único grupo.
-_STYLE = {
-    "mathrm": "upright",
-    "mathbf": "bold",
-    "boldsymbol": "bold",
-    "mathit": "italic",
-    "mathcal": "cal",
-    "mathscr": "cal",
-    "mathbb": "bb",
-    "mathsf": "sans",
-    "mathtt": "mono",
-    "hat": "hat",
-    "widehat": "hat",
-    "bar": "bar",
-    "overline": "overline",
-    "underline": "underline",
-    "vec": "arrow",
-    "tilde": "tilde",
-    "widetilde": "tilde",
-    "dot": "dot",
-    "ddot": "ddot",
-}
-
-#: Entornos matriciales soportados y su delimitador Typst (``None`` = paréntesis).
-_MATRIX_ENVS = {
-    "pmatrix": None,
-    "bmatrix": '"["',
-    "Bmatrix": '"{"',
-    "vmatrix": '"|"',
-    "Vmatrix": '"||"',
-    "matrix": "#none",
-    "smallmatrix": "#none",
-    "array": "#none",
-}
-
-_FRACTIONS = frozenset({"frac", "dfrac", "tfrac", "cfrac"})
-
-#: Comandos de "modo texto" dentro de matemáticas. Su argumento es texto literal
-#: (con espacios) y debe convertirse en una cadena Typst ``"..."``, nunca en un
-#: identificador: ``\text{ si }`` → ``upright(" si ")``, jamás ``upright(si)``.
-_TEXT_COMMANDS = frozenset({"text", "textrm", "textnormal", "textup", "mbox"})
-
-
-def _quote_typst_string(text: str) -> str:
-    """Entrecomilla ``text`` como literal de cadena Typst, escapando ``"`` y ``\\``.
-
-    El contenido de ``\text{...}`` es texto literal; Typst lo interpreta como
-    cadena (``upright(" si ")``) en lugar de como variables (``upright(si)``).
-    """
-    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
-    return f'"{escaped}"'
-
-
-def _scan_text_argument(tex: str, index: int) -> tuple[tuple[str, str], int] | None:
-    """Captura el argumento literal ``{...}`` de un comando de modo texto.
-
-    Devuelve el token ``("text", contenido_crudo)`` y el índice tras la llave de
-    cierre, conservando los espacios interiores intactos. Si el comando no va
-    seguido de un grupo ``{...}`` bien formado devuelve ``None``, en cuyo caso se
-    tratará como un comando normal.
-    """
-    length = len(tex)
-    cursor = index
-    while cursor < length and tex[cursor] in " \t\r\n":
-        cursor += 1
-    if cursor >= length or tex[cursor] != "{":
-        return None
-    depth = 1
-    start = cursor + 1
-    scan = start
-    while scan < length and depth > 0:
-        if tex[scan] == "{":
-            depth += 1
-        elif tex[scan] == "}":
-            depth -= 1
-            if depth == 0:
-                break
-        scan += 1
-    if depth != 0:
-        return None
-    return ("text", tex[start:scan]), scan + 1
-
-
-def _tokenize_tex(tex: str) -> list[tuple[str, str]]:
-    """Convierte TeX matemático en una lista de tokens ``(tipo, valor)``."""
-    tokens: list[tuple[str, str]] = []
-    index = 0
-    length = len(tex)
-    while index < length:
-        char = tex[index]
-        if char in " \t\r\n":
-            index += 1
-            continue
-        if char == "\\":
-            if index + 1 < length and tex[index + 1] == "\\":
-                tokens.append(("newline", "\\\\"))
-                index += 2
-                continue
-            if index + 1 < length:
-                following = tex[index + 1]
-                if following.isalpha():
-                    end = index + 1
-                    while end < length and tex[end].isalpha():
-                        end += 1
-                    name = tex[index + 1 : end]
-                    if name in _TEXT_COMMANDS:
-                        text_argument = _scan_text_argument(tex, end)
-                        if text_argument is not None:
-                            text_token, index = text_argument
-                            tokens.append(text_token)
-                            continue
-                    tokens.append(("cmd", name))
-                    index = end
-                else:
-                    tokens.append(("cmd", following))
-                    index += 2
-                continue
-            tokens.append(("cmd", " "))
-            index += 1
-            continue
-        if char == "{":
-            tokens.append(("open", "{"))
-        elif char == "}":
-            tokens.append(("close", "}"))
-        elif char == "&":
-            tokens.append(("align", "&"))
-        elif char in "^_":
-            tokens.append(("script", char))
-        else:
-            tokens.append(("char", char))
-        index += 1
-    return tokens
+#: Marcador que tylax inserta cuando la entrada LaTeX no se pudo analizar.
+_LATEX_ERROR_MARK = "/* LaTeX Error"
 
 
 class MathConverter:
-    """Conversor estructural de una fórmula TeX a Typst."""
+    """Conversor estructural de una fórmula TeX a Typst (fachada sobre tylax).
+
+    tylax (conversor LaTeX↔Typst escrito en Rust) traduce cada fórmula con un
+    catálogo de símbolos y expansión de macros mucho más amplios que el parser
+    propio que reemplaza. La clase conserva la API pública anterior
+    (``convert(tex)``) y el atributo ``_original`` para que los renderizadores
+    de bloques/inlines del módulo no cambien.
+    """
 
     def __init__(self) -> None:
         self._original = ""
 
     def convert(self, tex: str) -> str:
-        """Convierte una fórmula TeX (sin delimitadores ``$``) a Typst."""
-        self._original = tex
-        tokens = _tokenize_tex(tex)
-        result, index = self._parse_sequence(tokens, 0, frozenset())
-        if index < len(tokens):
-            raise TranspileError(
-                f"token no esperado en la fórmula: {tokens[index]!r}", original=tex
-            )
-        return result
+        """Convierte una fórmula TeX (sin delimitadores ``$``) a Typst.
 
-    # -- Análisis sintáctico ------------------------------------------------
-    @staticmethod
-    def _is_stop(token: tuple[str, str], stop: frozenset[str]) -> bool:
-        kind, value = token
-        if kind in stop:
-            return True
-        return kind == "cmd" and value == "end" and "end" in stop
-
-    @staticmethod
-    def _needs_space(previous: str, following: str) -> bool:
-        """Indica si dos átomos alfanuméricos adyacentes requieren un separador.
-
-        Typst une letras adyacentes en un único identificador, así que
-        ``\\alpha\\beta`` debe convertirse en ``alpha beta`` y ``x\\,dx`` en
-        ``x d x``. Un operador (``+``, ``=``, ``->``...) ya actúa de separador.
+        Raises:
+            TranspileError: si tylax no pudo analizar el LaTeX de entrada (la
+                salida contiene el marcador ``/* LaTeX Error ... */``). Los
+                comandos desconocidos **no** lanzan: se conservan como texto
+                crudo y la compilación real con Typst los detectará.
         """
-        return (
-            bool(previous) and bool(following) and previous[-1].isalnum() and following[0].isalnum()
-        )
-
-    def _parse_sequence(
-        self,
-        tokens: list[tuple[str, str]],
-        index: int,
-        stop: frozenset[str],
-        *,
-        sep: bool = True,
-    ):
-        parts: list[str] = []
-        while index < len(tokens):
-            token = tokens[index]
-            if self._is_stop(token, stop):
-                break
-            kind, value = token
-            if kind == "close":
-                raise TranspileError("llave '}' sin abrir", original=self._original)
-            if kind == "align":
-                raise TranspileError(
-                    "alineación '&' fuera de una matriz o casos", original=self._original
-                )
-            if kind == "newline":
-                raise TranspileError(
-                    "salto de línea '\\\\' fuera de una matriz o casos", original=self._original
-                )
-            if kind == "script":
-                raise TranspileError(
-                    "superíndice/subíndice sin base previa", original=self._original
-                )
-            atom, index = self._parse_atom(tokens, index)
-            while index < len(tokens) and tokens[index][0] == "script":
-                operator = tokens[index][1]
-                index += 1
-                argument, index = self._parse_script_argument(tokens, index)
-                atom += "^" + argument if operator == "^" else "_" + argument
-            if sep and parts and self._needs_space(parts[-1], atom):
-                parts.append(" ")
-            parts.append(atom)
-        return "".join(parts), index
-
-    def _parse_atom(self, tokens: list[tuple[str, str]], index: int):
-        if index >= len(tokens):
-            raise TranspileError("fórmula truncada", original=self._original)
-        kind, value = tokens[index]
-        if kind == "open":
-            return self._parse_group(tokens, index)
-        if kind == "cmd":
-            return self._parse_command(tokens, index)
-        if kind == "char":
-            return value, index + 1
-        if kind == "text":
-            return f"upright({_quote_typst_string(value)})", index + 1
-        raise TranspileError(f"token no esperado {tokens[index]!r}", original=self._original)
-
-    def _parse_group(self, tokens: list[tuple[str, str]], index: int, *, sep: bool = True):
-        # tokens[index] == ("open", "{")
-        index += 1
-        content, index = self._parse_sequence(tokens, index, frozenset({"close"}), sep=sep)
-        if index < len(tokens) and tokens[index][0] == "close":
-            index += 1
-        else:
-            raise TranspileError("llave '{' sin cerrar", original=self._original)
-        return content, index
-
-    def _require_group(self, tokens: list[tuple[str, str]], index: int, *, sep: bool = True):
-        if index >= len(tokens) or tokens[index][0] != "open":
-            raise TranspileError("se esperaba un grupo '{...}'", original=self._original)
-        return self._parse_group(tokens, index, sep=sep)
-
-    def _parse_script_argument(self, tokens: list[tuple[str, str]], index: int):
-        if index >= len(tokens):
-            raise TranspileError("script sin argumento", original=self._original)
-        if tokens[index][0] == "open":
-            content, index = self._parse_group(tokens, index)
-            return f"({content})", index
-        atom, index = self._parse_atom(tokens, index)
-        return f"({atom})", index
-
-    def _parse_optional_bracket(self, tokens: list[tuple[str, str]], index: int):
-        # tokens[index] == ("char", "[")
-        index += 1
-        chars: list[str] = []
-        while index < len(tokens) and not (tokens[index][0] == "char" and tokens[index][1] == "]"):
-            chars.append(tokens[index][1])
-            index += 1
-        if index < len(tokens) and tokens[index][0] == "char" and tokens[index][1] == "]":
-            index += 1
-        else:
-            raise TranspileError("corchete ']' sin cerrar", original=self._original)
-        return "".join(chars), index
-
-    def _parse_substack(self, tokens: list[tuple[str, str]], index: int):
-        # tokens[index] == ("open", "{")
-        index += 1
-        items: list[str] = []
-        stop = frozenset({"newline", "close"})
-        while index < len(tokens):
-            token = tokens[index]
-            if token[0] == "close":
-                break
-            cell, index = self._parse_sequence(tokens, index, stop)
-            items.append(cell)
-            if index < len(tokens) and tokens[index][0] == "newline":
-                index += 1
-                continue
-        if index < len(tokens) and tokens[index][0] == "close":
-            index += 1
-        else:
-            raise TranspileError("\\substack sin grupo de cierre", original=self._original)
-        return items, index
-
-    def _parse_environment(self, tokens: list[tuple[str, str]], index: int):
-        # tokens[index] == ("open", "{") tras el comando \begin
-        if index >= len(tokens) or tokens[index][0] != "open":
-            raise TranspileError("\\begin sin nombre de entorno", original=self._original)
-        index += 1
-        name_chars: list[str] = []
-        while index < len(tokens) and tokens[index][0] == "char":
-            name_chars.append(tokens[index][1])
-            index += 1
-        if index < len(tokens) and tokens[index][0] == "close":
-            index += 1
-        else:
-            raise TranspileError("\\begin sin llave de cierre", original=self._original)
-        environment = "".join(name_chars)
-
-        rows: list[list[str]] = []
-        current: list[str] = []
-        stop = frozenset({"align", "newline", "end"})
-        while index < len(tokens):
-            token = tokens[index]
-            if token[0] == "cmd" and token[1] == "end":
-                break
-            cell, index = self._parse_sequence(tokens, index, stop)
-            current.append(cell)
-            if index >= len(tokens):
-                break
-            token = tokens[index]
-            if token[0] == "align":
-                index += 1
-                continue
-            if token[0] == "newline":
-                index += 1
-                rows.append(current)
-                current = []
-                continue
-            break
-        if current:
-            rows.append(current)
-
-        if index < len(tokens) and tokens[index][0] == "cmd" and tokens[index][1] == "end":
-            index += 1
-            if index < len(tokens) and tokens[index][0] == "open":
-                index += 1
-                while index < len(tokens) and tokens[index][0] == "char":
-                    index += 1
-                if index < len(tokens) and tokens[index][0] == "close":
-                    index += 1
-        else:
-            raise TranspileError(f"entorno '{environment}' sin \\end", original=self._original)
-        return self._render_environment(environment, rows), index
-
-    def _render_environment(self, environment: str, rows: list[list[str]]) -> str:
-        if environment == "cases":
-            cells = [cell for row in rows for cell in row]
-            return "cases(" + ", ".join(cells) + ")"
-        if environment == "aligned":
-            # `x &= 1` alinea en el `=`: se concatenan las celdas de cada fila.
-            body = "; ".join("".join(row) for row in rows)
-            return "mat(" + body + ")"
-        if environment in _MATRIX_ENVS:
-            body = "; ".join(", ".join(row) for row in rows)
-            delimiter = _MATRIX_ENVS[environment]
-            if delimiter is None:
-                return "mat(" + body + ")"
-            return f"mat(delim: {delimiter}, " + body + ")"
-        raise TranspileError(f"entorno TeX no soportado: {environment}", original=self._original)
-
-    # -- Despacho de comandos ----------------------------------------------
-    def _parse_command(self, tokens: list[tuple[str, str]], index: int):
-        _, name = tokens[index]
-        index += 1
-
-        if name in _SPACING:
-            return "" if name == "!" else " ", index
-        if name in ("quad", "qquad"):
-            return " ", index
-        if name in _TRANSPARENT:
-            return "", index
-        if name in _ESCAPED:
-            return _ESCAPED[name], index
-        if name in _STYLE:
-            argument, index = self._require_group(tokens, index, sep=False)
-            return f"{_STYLE[name]}({argument})", index
-        if name in _GREEK:
-            return _GREEK[name], index
-        if name in _SYMBOLS:
-            return _SYMBOLS[name], index
-        if name in _OPERATORS:
-            return _OPERATORS[name], index
-        if name in _FRACTIONS:
-            numerator, index = self._require_group(tokens, index)
-            denominator, index = self._require_group(tokens, index)
-            return f"frac({numerator}, {denominator})", index
-        if name == "sqrt":
-            degree: str | None = None
-            if index < len(tokens) and tokens[index][0] == "char" and tokens[index][1] == "[":
-                degree, index = self._parse_optional_bracket(tokens, index)
-            argument, index = self._require_group(tokens, index)
-            if degree is not None:
-                return f"root({degree}, {argument})", index
-            return f"sqrt({argument})", index
-        if name == "substack":
-            items, index = self._parse_substack(tokens, index)
-            return "std.stack(" + ", ".join(items) + ")", index
-        if name == "begin":
-            return self._parse_environment(tokens, index)
-        if name == "end":
-            raise TranspileError("\\end sin \\begin correspondiente", original=self._original)
-        raise TranspileError(f"comando TeX no soportado: \\{name}", original=self._original)
+        self._original = tex
+        result = tylax.latex_to_typst(tex, options=_L2T_OPTIONS)
+        if _LATEX_ERROR_MARK in result:
+            raise TranspileError(f"LaTeX no analizable por tylax: {result.strip()}", original=tex)
+        return result
 
 
 # ---------------------------------------------------------------------------
