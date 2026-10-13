@@ -43,6 +43,8 @@ packages = ["src/taygeta"]
 dev = [
     "pytest>=8.3.0",
     "pytest-cov>=6.0.0",
+    # Plugin de pytest para los tests async del arnés NiceGUI (`user_simulation`).
+    "anyio>=4.0.0",
     "ruff>=0.8.0",
     "mypy>=1.13.0",
     "pyright>=1.1.414",
