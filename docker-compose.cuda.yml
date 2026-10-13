@@ -20,10 +20,17 @@ services:
     build:
       context: .
       dockerfile: docker/ocr/Dockerfile.cuda
+      # Arquitecturas CUDA a compilar. Incluye sm_90 (Hopper); ajusta a las GPUs
+      # reales del despliegue.
+      args:
+        CUDA_ARCHITECTURES: "${CUDA_ARCHITECTURES:-61;70;75;80;86;89;90}"
     image: taygeta-ocr:cuda
     environment:
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
+      OCR_GPU_LAYERS: 99
+      # Aborta si no se detecta GPU en vez de caer silenciosamente a CPU.
+      OCR_REQUIRE_GPU: "1"
     deploy:
       resources:
         reservations:

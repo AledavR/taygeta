@@ -12,6 +12,10 @@ services:
     build:
       context: .
       dockerfile: docker/ocr/Dockerfile.rocm
+      # Arquitectura GPU a compilar. Por defecto gfx1030 (RX 6800/6800XT/6900XT).
+      # Otros ejemplos: gfx1100 (RX 7900), gfx1031 (RX 6700), gfx900 (Vega).
+      args:
+        AMDGPU_TARGETS: ${AMDGPU_TARGETS:-gfx1030}
     image: taygeta-ocr:rocm
     # Acceso mínimo a los dispositivos AMD (sin privileged).
     devices:
@@ -23,13 +27,15 @@ services:
       - video
       - render
     environment:
-      # Configurable: vaciar/eliminar si ROCm detecta la arquitectura sin override.
-      HSA_OVERRIDE_GFX_VERSION: ${HSA_OVERRIDE_GFX_VERSION:-10.3.0}
-      # Capas descargadas a GPU. LLAMA_ARG_N_GPU_LAYERS lo lee llama-server de
-      # forma nativa; OCR_GPU_LAYERS es el valor que consume entrypoint.sh para
-      # construir el flag explícito -ngl/--n-gpu-layers (red de seguridad).
-      LLAMA_ARG_N_GPU_LAYERS: 99
+      # Override HSA SOLO si ROCm no detecta la GPU de forma nativa. Déjalo SIN
+      # definir (se elimina del entorno) para usar detección nativa; NO lo dejes
+      # vacío, un valor vacío rompe la detección. Ejemplo RDNA2: 10.3.0.
+      HSA_OVERRIDE_GFX_VERSION: ${HSA_OVERRIDE_GFX_VERSION:-}
+      # Capas descargadas a GPU (flag explícito -ngl/--n-gpu-layers). No se usa
+      # LLAMA_ARG_N_GPU_LAYERS para evitar el aviso de sobrescritura.
       OCR_GPU_LAYERS: 99
+      # Aborta si no se detecta GPU en vez de caer silenciosamente a CPU.
+      OCR_REQUIRE_GPU: "1"
     volumes:
       - ocr-models:/models
       - ocr-cache:/cache

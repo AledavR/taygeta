@@ -27,6 +27,37 @@ CONTEXT="${OCR_CONTEXT_SIZE:-8192}"
 PARALLEL="${OCR_CONCURRENCY:-1}"
 THREADS="${OCR_THREADS:-$(nproc)}"
 GPU_LAYERS="${OCR_GPU_LAYERS:-99}"
+REQUIRE_GPU="${OCR_REQUIRE_GPU:-0}"
+API_KEY="${OCR_API_KEY:-}"
+
+# ROCm: un HSA_OVERRIDE_GFX_VERSION definido pero VACÍO hace que HIP no detecte
+# ninguna GPU y llama.cpp caiga silenciosamente a CPU. Tratar vacío como
+# "sin override" (detección nativa) para evitar ese fallback silencioso.
+if [ -z "${HSA_OVERRIDE_GFX_VERSION:-}" ]; then
+  unset HSA_OVERRIDE_GFX_VERSION
+fi
+
+# verify_gpu: con OCR_REQUIRE_GPU=1 aborta si llama.cpp no ve una GPU real. Evita
+# que el contenedor se marque saludable ejecutando en CPU (o entre en bucle de
+# reinicio sin un mensaje claro).
+verify_gpu() {
+  if [ "${REQUIRE_GPU}" != "1" ]; then
+    return 0
+  fi
+  local devices
+  devices="$(llama-server --list-devices 2>&1 || true)"
+  # Ancla a las líneas de dispositivo reales ("  ROCm0: ...", "  CUDA0: ...") para
+  # no dar falso positivo con mensajes de error que mencionan "ROCm".
+  if ! printf '%s\n' "${devices}" | grep -Eq '^[[:space:]]*(ROCm|CUDA)[0-9]+:'; then
+    echo "ERROR: OCR_REQUIRE_GPU=1 pero no se detectó ninguna GPU." >&2
+    printf '%s\n' "${devices}" >&2
+    echo "Revisa driver/ROCm, el acceso a /dev/kfd y /dev/dri, y que" >&2
+    echo "HSA_OVERRIDE_GFX_VERSION no esté definido vacío." >&2
+    return 1
+  fi
+  echo "GPU detectada:"
+  printf '%s\n' "${devices}" | grep -E '^[[:space:]]*(ROCm|CUDA)[0-9]+:' | sed 's/^/  /'
+}
 
 download_file() {
   # download_file <url> <destino>
@@ -82,6 +113,10 @@ if [ -n "${MMPROJ_PATH}" ]; then
   ensure_file "${MMPROJ_PATH}" "${MMPROJ_URL}" "el proyector visual (mmproj)" || exit 1
 fi
 
+# Verifica (si se exige) que haya GPU antes de arrancar; falla con mensaje claro
+# en lugar de degradar a CPU.
+verify_gpu || exit 1
+
 args=(
   --host 0.0.0.0
   --port "${PORT}"
@@ -93,9 +128,13 @@ args=(
   --threads "${THREADS}"
 )
 
+if [ -n "${API_KEY}" ]; then
+  args+=(--api-key "${API_KEY}")
+fi
+
 if [ -n "${MMPROJ_PATH}" ]; then
   args+=(--mmproj "${MMPROJ_PATH}")
 fi
 
-echo "Iniciando OCR: modelo=${MODEL_PATH} mmproj=${MMPROJ_PATH:-<ninguno>} ctx=${CONTEXT} parallel=${PARALLEL} ngl=${GPU_LAYERS} puerto=${PORT}"
+echo "Iniciando OCR: modelo=${MODEL_PATH} mmproj=${MMPROJ_PATH:-<ninguno>} ctx=${CONTEXT} parallel=${PARALLEL} ngl=${GPU_LAYERS} puerto=${PORT} api_key=$([ -n "${API_KEY}" ] && echo 'sí' || echo 'no')"
 exec llama-server "${args[@]}"

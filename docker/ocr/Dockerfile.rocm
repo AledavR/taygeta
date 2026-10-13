@@ -14,12 +14,13 @@
 FROM rocm/dev-ubuntu-22.04:6.2.2
 
 ARG LLAMA_CPP_REF=b11559
-# Objetivo(s) GPU a compilar. Ajusta a la arquitectura real, p. ej. gfx1100.
+# Objetivo(s) GPU a compilar. Se inyecta desde docker-compose.rocm.yml
+# (build.args.AMDGPU_TARGETS); por defecto gfx1030 (RX 6800/6800XT/6900XT).
 ARG AMDGPU_TARGETS=gfx1030
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      git cmake build-essential ca-certificates libcurl4-openssl-dev \
+      git cmake build-essential ca-certificates curl libcurl4-openssl-dev \
       hipblas-dev rocblas-dev \
  && rm -rf /var/lib/apt/lists/*
 

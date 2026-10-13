@@ -245,8 +245,13 @@ docker compose -f docker-compose.yml -f docker-compose.cuda.yml config -q
 Requisitos del host para GPU:
 
 - **ROCm**: driver AMD + ROCm compatibles con la imagen base; acceso a `/dev/kfd`
-  y `/dev/dri`; grupos `video`/`render` según el host. Fija `AMDGPU_TARGETS` al
-  compilar la imagen OCR a tu arquitectura (p. ej. `gfx1100`).
+  y `/dev/dri`; grupos `video`/`render` según el host. Ajusta `AMDGPU_TARGETS`
+  (p. ej. `gfx1100` para RX 7900) antes de compilar la imagen OCR. Solo si ROCm
+  no detecta la GPU de forma nativa define `HSA_OVERRIDE_GFX_VERSION` (p. ej.
+  `10.3.0` para RDNA2); **nunca lo dejes vacío**: un valor vacío desactiva la
+  detección y el OCR cae a CPU. Con `OCR_REQUIRE_GPU=1` (ya activo en el
+  override) el contenedor **aborta con un mensaje claro** si no ve la GPU, en
+  lugar de arrancar degradado.
 - **CUDA**: driver NVIDIA + NVIDIA Container Toolkit. Verifica primero:
   ```bash
   docker run --rm --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi
