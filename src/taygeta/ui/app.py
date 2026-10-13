@@ -819,7 +819,8 @@ def _render_figure_review(
     manual con el cropper sobre la página original del documento. Debajo, el
     botón ``➕ Añadir nueva figura`` permite cubrir falsos negativos recortando
     figuras que el modelo de visión omitió por completo. La página original se
-    consulta en su propia pestaña (``_render_original_pages``).
+    consulta en su propia vista (``_render_original_pages``), seleccionable con
+    el radio de la columna derecha.
     """
     question = staged.question
     figures = _figures_state(index, question.figures if question is not None else [])
@@ -848,11 +849,12 @@ def _render_figure_review(
 
 
 def _render_original_pages(question: EnrichedQuestion | None, source_path: str | None) -> None:
-    """Muestra la(s) página(s) original(es) del documento en su propia pestaña.
+    """Muestra la(s) página(s) original(es) del documento en su propia vista.
 
     Rasteriza las páginas referenciadas por las figuras de la pregunta (o la
     página 0 si no hay figuras) para inspeccionar el documento fuente y detectar
-    figuras que el modelo de visión pudo omitir (falsos negativos).
+    figuras que el modelo de visión pudo omitir (falsos negativos). Se integra
+    en la vista «Página original» del radio de la columna derecha.
     """
     if source_path is None:
         st.caption("No hay documento de origen para mostrar.")
@@ -1219,10 +1221,16 @@ def _render_review(
                     approved.append((approved_question, new_prereqs))
             with right:
                 st.caption("Figuras de la pregunta")
-                tabs = st.tabs(["Figuras", "Página original"])
-                with tabs[0]:
+                view = st.radio(
+                    "Vista",
+                    ["Figuras", "Página original"],
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    key=f"fig_view_{index}",
+                )
+                if view == "Figuras":
                     _render_figure_review(index, staged, source_path, storage, settings)
-                with tabs[1]:
+                else:
                     _render_original_pages(base, source_path)
 
     st.divider()
