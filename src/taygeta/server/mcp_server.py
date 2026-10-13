@@ -205,6 +205,13 @@ def stage_exam_upload(file_path: str, auto_commit: bool = True) -> str:
 
     review_url = f"{settings.UI_PUBLIC_URL.rstrip('/')}/?session_id={session_id}"
     status = STATUS_NEEDS_ATTENTION if problems else result.status
+    if problems:
+        message = "hay incidencias; revisa la sesión en la UI: " + review_url
+    else:
+        message = (
+            f"{summary['valid']} pregunta(s) válida(s) en la sesión de staging; "
+            "revisa y confirma en la UI: " + review_url
+        )
     return _json(
         {
             "status": status,
@@ -215,7 +222,7 @@ def stage_exam_upload(file_path: str, auto_commit: bool = True) -> str:
             "needs_attention": summary["needs_attention"],
             "problems": problems,
             "warnings": result.warnings,
-            "message": "hay incidencias; revisa la sesión en la UI: " + review_url,
+            "message": message,
         }
     )
 
