@@ -31,6 +31,13 @@ services:
       # definir (se elimina del entorno) para usar detección nativa; NO lo dejes
       # vacío, un valor vacío rompe la detección. Ejemplo RDNA2: 10.3.0.
       HSA_OVERRIDE_GFX_VERSION: ${HSA_OVERRIDE_GFX_VERSION:-}
+      # Workaround gfx1030 (RX 6800/6800XT/6900XT): con ROCm sobre kernels muy
+      # recientes, la carga del modelo puede fallar con "Memory access fault ...
+      # Page not present or supervisor privilege". Desactivar SDMA evita el fallo
+      # (las copias caen a la cola de cómputo; el coste es mínimo). Verificado en
+      # RX 6800 XT + kernel 7.x. En RDNA3 (gfx1100) suele no ser necesario:
+      # sobrescríbelo con HSA_ENABLE_SDMA=1 si tu GPU no lo requiere.
+      HSA_ENABLE_SDMA: ${HSA_ENABLE_SDMA:-0}
       # Capas descargadas a GPU (flag explícito -ngl/--n-gpu-layers). No se usa
       # LLAMA_ARG_N_GPU_LAYERS para evitar el aviso de sobrescritura.
       OCR_GPU_LAYERS: 99
