@@ -25,9 +25,11 @@ __all__ = [
     "NORMALIZED_MAX",
     "append_figure_placeholder",
     "bbox_to_pixel_box",
+    "build_new_figure",
     "next_figure_id",
     "pixel_box_to_normalized_bbox",
     "reconcile_figures_with_statement",
+    "remove_figure",
     "strip_figure_placeholder",
 ]
 
@@ -189,3 +191,52 @@ def reconcile_figures_with_statement(
     efectivas = [figure for figure in declared if _figure_id(figure) in referenced]
     huerfanas = [figure for figure in declared if _figure_id(figure) not in referenced]
     return efectivas, huerfanas, colgantes
+
+
+def _as_dict(figure: Mapping[str, Any] | Any) -> dict[str, Any]:
+    """Conversión de una figura (mapping o modelo) a diccionario plano."""
+    if isinstance(figure, Mapping):
+        return dict(figure)
+    return getattr(figure, "model_dump", lambda: {})()  # type: ignore[operator]
+
+
+def build_new_figure(
+    figures: Sequence[Mapping[str, Any] | Any],
+    statement: str,
+    *,
+    page_index: int,
+    bbox: Sequence[int],
+    asset_path: str,
+) -> tuple[list[dict[str, Any]], str, str]:
+    """Construye la entrada de una figura nueva y el enunciado con su placeholder.
+
+    Asigna el siguiente ``fig:N`` libre a partir de ``figures`` y de los
+    placeholders de ``statement`` (ver ``next_figure_id``) y devuelve
+    ``(figuras, enunciado, figure_id)``. Es un helper puro: recortar y subir el
+    asset al bucket es responsabilidad del llamador, que ya dispone de
+    ``asset_path`` al invocarlo.
+    """
+    figure_id = next_figure_id(list(figures), statement)
+    new_figure = {
+        "id": figure_id,
+        "page": int(page_index),
+        "bbox": list(bbox),
+        "caption": None,
+        "asset_path": asset_path,
+    }
+    return [*figures, new_figure], append_figure_placeholder(statement, figure_id), figure_id
+
+
+def remove_figure(
+    figures: Sequence[Mapping[str, Any] | Any],
+    statement: str,
+    figure_id: str,
+) -> tuple[list[dict[str, Any]], str, list[dict[str, Any]]]:
+    """Elimina una figura y su placeholder del enunciado (sin efectos laterales).
+
+    Devuelve ``(figuras_restantes, enunciado_limpio, eliminadas)``. El llamador
+    decide si purga del bucket los assets de las figuras eliminadas.
+    """
+    kept = [_as_dict(item) for item in figures if _figure_id(item) != figure_id]
+    removed = [_as_dict(item) for item in figures if _figure_id(item) == figure_id]
+    return kept, strip_figure_placeholder(statement, figure_id), removed

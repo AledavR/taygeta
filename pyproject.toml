@@ -26,11 +26,13 @@ dependencies = [
     # Conversor LaTeX↔Typst en Rust (tylax) para las fórmulas del transpilador.
     # Wheel abi3 (cp310+) → compatible con Python 3.11; requiere glibc >= 2.34.
     "tylax>=0.3.8,<1",
+    "nicegui>=3.18.0",
 ]
 
 [project.scripts]
 taygeta-ingest = "taygeta.ingest.pipeline:main"
 taygeta-server = "taygeta.server.mcp_server:main"
+taygeta-ui = "taygeta.ui.nice.app:main"
 
 [build-system]
 requires = ["hatchling"]
