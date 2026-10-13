@@ -61,7 +61,7 @@ Ingesta **híbrida Edge-to-Cloud** en dos pases claramente separados:
      Capa 1 heurística local  +  Capa 2 semántica remota
      │
      ▼
-[5] Staging (VALID / NEEDS_ATTENTION)  →  Revisión humana (Streamlit / chat MCP)
+[5] Staging (VALID / NEEDS_ATTENTION)  →  Revisión humana (UI NiceGUI / chat MCP)
      │
      ▼
 [6] Confirmación explícita → SQLite (taygeta.db, búsqueda FTS5)
@@ -80,7 +80,7 @@ Componentes transversales:
 - **Persistencia** (`server/db.py`): SQLite + tabla virtual **FTS5** sincronizada
   por triggers; taxonomía y staging.
 - **Objetos** (`server/object_storage.py`): cliente boto3 para SeaweedFS (S3).
-- **UI** (`ui/app.py`): Streamlit HITL.
+- **UI** (`ui/nice/`): revisión Human-in-the-Loop en **NiceGUI** (FastAPI).
 - **Servidor** (`server/mcp_server.py`): herramientas FastMCP, descargas HTTP y
   limpiador TTL.
 
@@ -111,7 +111,7 @@ taygeta/
     ├── agents/   structurer.py
     ├── ingest/   image_extractor.py · ocr_client.py · validator.py · pipeline.py
     ├── server/   db.py · object_storage.py · exam_generator.py · mcp_server.py
-    └── ui/       app.py
+    └── ui/       nice/ (app.py · question_panel.py · figures.py · state.py) · shared.py · figure_editing.py
 ```
 
 ---
@@ -179,12 +179,21 @@ uv run taygeta-server          # FastMCP con transporte streamable-http
 Expone el protocolo MCP en `/mcp` y las rutas HTTP `/health`,
 `/download/{filename}` y `/assets/{asset_id}`.
 
-### Interfaz Streamlit (HITL)
+### Interfaz de revisión Human-in-the-Loop (NiceGUI)
 
 ```bash
-uv run streamlit run src/taygeta/ui/app.py --server.port 8501 --server.address 0.0.0.0
+uv run taygeta-ui            # o: uv run python -m taygeta.ui.nice
 # http://localhost:8501
 ```
+
+La UI permite: subir un PDF/PNG/JPG, procesarlo con el pipeline de doble pase
+en background (sin bloquear la interfaz), revisar cada pregunta (editor
+Markdown/TeX con previsualización, taxonomía con comboboxes de curso/tema,
+opciones avanzadas con reanálisis in-place) y gestionar las figuras a la
+derecha (vistas «Figuras» / «Página original», recorte por arrastre, alta y
+borrado) antes de confirmar explícitamente la persistencia en SQLite.
+
+Host y puerto se ajustan con `TAYGETA_UI_HOST` / `TAYGETA_UI_PORT`.
 
 ---
 

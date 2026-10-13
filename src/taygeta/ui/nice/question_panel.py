@@ -1,9 +1,8 @@
 """Panel de revisión de una pregunta en la UI NiceGUI.
 
-Porta el comportamiento del ``_render_review`` de Streamlit al modelo de estado
-por eventos de NiceGUI: la página se construye una vez por sesión y los eventos
-mutan el estado (``QuestionState``) y refrescan los contenedores, sin
-``st.session_state`` ni reruns.
+Modelo de estado por eventos: la página se construye una vez por sesión y los
+eventos mutan el estado (``QuestionState``) y refrescan los contenedores, sin
+reruns.
 
 El panel contiene:
 

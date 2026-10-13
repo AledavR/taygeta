@@ -18,14 +18,12 @@ dependencies = [
     "torch>=2.0.0",
     "pymupdf>=1.25.0",
     "pillow>=11.0.0",
-    "streamlit>=1.40.0",
-    # Recorte manual de figuras (bounding box) en la revisión HITL.
-    "streamlit-cropper>=0.3.1,<1",
     "pandoc>=2.4",
     "boto3>=1.35.0",
     # Conversor LaTeX↔Typst en Rust (tylax) para las fórmulas del transpilador.
     # Wheel abi3 (cp310+) → compatible con Python 3.11; requiere glibc >= 2.34.
     "tylax>=0.3.8,<1",
+    # UI HITL (revisión y recorte manual de figuras) sobre FastAPI.
     "nicegui>=3.18.0",
 ]
 

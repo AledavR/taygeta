@@ -197,7 +197,7 @@ def stage_exam_upload(file_path: str, auto_commit: bool = True) -> str:
 
     session_id = str(uuid.uuid4())
     _headless_cache[session_id] = _staging_payload(result)
-    review_url = f"{settings.STREAMLIT_PUBLIC_URL.rstrip('/')}/?session_id={session_id}"
+    review_url = f"{settings.UI_PUBLIC_URL.rstrip('/')}/?session_id={session_id}"
     status = STATUS_NEEDS_ATTENTION if problems else result.status
     return _json(
         {

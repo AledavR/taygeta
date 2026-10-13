@@ -17,7 +17,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__ = ["Settings", "get_settings", "mask_secret"]
@@ -161,8 +161,10 @@ class Settings(BaseSettings):
     # -- Direcciones públicas de los servicios ------------------------------
     MCP_HOST: str = Field(default="0.0.0.0", description="Host de escucha del servidor MCP.")
     MCP_PORT: int = Field(default=8000, ge=1, le=65535, description="Puerto del servidor MCP.")
-    STREAMLIT_PUBLIC_URL: str = Field(
-        default="http://localhost:8501", description="URL pública de la interfaz Streamlit."
+    UI_PUBLIC_URL: str = Field(
+        default="http://localhost:8501",
+        validation_alias=AliasChoices("UI_PUBLIC_URL", "STREAMLIT_PUBLIC_URL"),
+        description="URL pública de la interfaz HITL (NiceGUI).",
     )
     DOWNLOAD_PUBLIC_URL: str = Field(
         default="http://localhost:8000", description="URL pública del servidor de descargas."
@@ -309,7 +311,7 @@ class Settings(BaseSettings):
             "ocr_api_key": mask_secret(self.OCR_API_KEY),
             "mcp_host": self.MCP_HOST,
             "mcp_port": self.MCP_PORT,
-            "streamlit_public_url": self.STREAMLIT_PUBLIC_URL,
+            "ui_public_url": self.UI_PUBLIC_URL,
             "download_public_url": self.DOWNLOAD_PUBLIC_URL,
         }
 

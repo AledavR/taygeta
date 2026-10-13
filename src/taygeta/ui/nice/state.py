@@ -1,11 +1,10 @@
 """Estado de sesión de la UI NiceGUI (aislado por cliente del navegador).
 
-NiceGUI no tiene el modelo de rerun de Streamlit: la página se construye una vez
-por sesión y los eventos mutan objetos Python que refrescan los contenedores.
-Este módulo mantiene un registro por ``client.id`` para que un recambio de
-página (al volver a cargar la URL, p. ej.) no pierda el staging en curso; los
-estados se liberan al desconectarse el cliente (ver ``app.on_disconnect`` en
-``app.py``).
+NiceGUI no tiene un modelo de rerun: la página se construye una vez por sesión
+y los eventos mutan objetos Python que refrescan los contenedores. Este módulo
+mantiene un registro por ``client.id`` para que un recambio de página (al
+volver a cargar la URL, p. ej.) no pierda el staging en curso; los estados se
+liberan al desconectarse el cliente (ver ``app.on_disconnect`` en ``app.py``).
 """
 
 from __future__ import annotations
@@ -22,8 +21,7 @@ class QuestionState:
 
     ``figures`` es la fuente de verdad durante la revisión: refleja los
     borrados, recortes y altas que el usuario hace sobre las figuras
-    estructuradas por el pipeline (mismo rol que ``st.session_state["figures_N"]``
-    en la UI Streamlit).
+    estructuradas por el pipeline.
     """
 
     figures: list[dict[str, Any]] = field(default_factory=list)

@@ -1,4 +1,4 @@
-"""Edición manual de figuras en la revisión HITL (helpers puros, sin Streamlit).
+"""Edición manual de figuras en la revisión HITL (helpers puros, sin framework).
 
 Centraliza la lógica reutilizable entre la UI y los tests:
 
@@ -10,7 +10,8 @@ Centraliza la lógica reutilizable entre la UI y los tests:
 * reconciliación figuras/placeholders conservando la correspondencia uno a uno
   que impone ``QuestionRaw`` al confirmar la pregunta.
 
-Este módulo no importa Streamlit para que las funciones sean unit-testables.
+Este módulo no importa ninguna librería de UI para que las funciones sean
+unit-testables.
 """
 
 from __future__ import annotations

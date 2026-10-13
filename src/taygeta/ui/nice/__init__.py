@@ -1,7 +1,6 @@
-"""UI de revisión Human-in-the-Loop en NiceGUI (migración desde Streamlit).
+"""UI de revisión Human-in-the-Loop en NiceGUI.
 
-Mismo flujo que la aplicación Streamlit, con el modelo de estado por eventos de
-NiceGUI (sin ``st.session_state`` ni reruns): la página se construye una vez por
+Modelo de estado por eventos (sin reruns): la página se construye una vez por
 sesión y los eventos mutan objetos Python y refrescan los contenedores.
 """
 

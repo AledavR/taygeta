@@ -1,7 +1,8 @@
 """Aplicación NiceGUI de revisión Human-in-the-Loop de Taygeta.
 
-Migración de la UI Streamlit (``taygeta.ui.app``) al modelo de estado por
-eventos de NiceGUI (sin reruns ni ``st.session_state``). El flujo es el mismo:
+Modelo de estado por eventos (sin reruns): la página se construye una vez por
+sesión y los manejadores mutan objetos Python que refrescan sus contenedores.
+El flujo es:
 
 1. subida de PDF/PNG/JPG al directorio ``UPLOADS_DIR``;
 2. procesamiento con el pipeline de doble pase en background

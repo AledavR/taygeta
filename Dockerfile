@@ -91,12 +91,12 @@ RUN mkdir -p /app/data /app/uploads /app/downloads \
 
 USER taygeta
 
-# 8000: MCP/HTTP de descargas. 8501: Streamlit (servicio `ui`, misma imagen).
+# 8000: MCP/HTTP de descargas. 8501: UI HITL NiceGUI (servicio `ui`, misma imagen).
 EXPOSE 8000 8501
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=5 \
   CMD curl -fsS http://localhost:8000/health || exit 1
 
 # Comando de inicio del servidor MCP (script instalado por el proyecto).
-# La UI se inicia con: streamlit run src/taygeta/ui/app.py --server.port 8501 --server.address 0.0.0.0
+# La UI se inicia con: taygeta-ui (servicio `ui` en docker-compose.yml).
 CMD ["taygeta-server"]

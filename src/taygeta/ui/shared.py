@@ -1,7 +1,6 @@
-"""Helpers compartidos por las UIs de Taygeta (independientes del framework).
+"""Helpers compartidos por la UI HITL de Taygeta (independientes del framework).
 
-Concentra la lógica reutilizable que antes vivía en ``taygeta.ui.app``
-(Streamlit) para que la nueva UI NiceGUI la consuma **sin importar Streamlit**:
+Concentra la lógica reutilizable de la UI:
 
 * subida/guardado de documentos y listado del directorio de subidas;
 * rasterización de páginas y recuperación de figuras desde SeaweedFS;
@@ -9,8 +8,8 @@ Concentra la lógica reutilizable que antes vivía en ``taygeta.ui.app``
 * construcción de :class:`EnrichedQuestion` a partir de los campos revisados
   y persistencia de preguntas aprobadas (``persist_approved_questions``).
 
-Este módulo no importa Streamlit ni NiceGUI, por lo que es unit-testable y
-compartible entre ambas capas de UI mientras dura la migración.
+Este módulo no importa NiceGUI, por lo que es unit-testable y reutilizable
+desde cualquier capa.
 """
 
 from __future__ import annotations
