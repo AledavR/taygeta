@@ -113,7 +113,10 @@ formateado como su clasificación curricular. Reglas:
 
 1. statement_raw: enunciado en Markdown/TeX, conservando los placeholders \
 {{fig:N}} exactamente en su posición y asociándolos solo a las figuras \
-declaradas. Delimitadores matemáticos OBLIGATORIOS: usa EXCLUSIVAMENTE $...$ \
+declaradas. Inserta {{fig:N}} SOLO si el enunciado depende explícitamente de \
+un gráfico, diagrama o ilustración presente en esa región; si no hay una \
+figura explícita, NO declares fig:N ni insertes placeholder alguno. \
+Delimitadores matemáticos OBLIGATORIOS: usa EXCLUSIVAMENTE $...$ \
 para matemáticas inline y $$...$$ para matemáticas en bloque; PROHIBIDO \
 \\[...\\], \\], \\(...\\), \\( o \\), así como sus variantes escapadas \
 (reescríbelos siempre como $$...$$ o $...$ respectivamente).
@@ -154,7 +157,10 @@ re-infiere la clasificación curricular completa. Reglas:
 
 1. statement_raw: corrige el enunciado en Markdown/TeX aplicando el contexto \
 correctivo, conservando los placeholders {{fig:N}} exactamente en su posición y \
-asociándolos solo a las figuras declaradas. Delimitadores matemáticos \
+asociándolos solo a las figuras declaradas. Inserta {{fig:N}} SOLO si el \
+enunciado depende explícitamente de un gráfico, diagrama o ilustración \
+presente en esa región; si no hay una figura explícita, NO declares fig:N ni \
+insertes placeholder alguno. Delimitadores matemáticos \
 OBLIGATORIOS: usa EXCLUSIVAMENTE $...$ para matemáticas inline y $$...$$ para \
 matemáticas en bloque; PROHIBIDO \\[...\\], \\], \\(...\\), \\( o \\), así como \
 sus variantes escapadas (reescríbelos siempre como $$...$$ o $...$ \

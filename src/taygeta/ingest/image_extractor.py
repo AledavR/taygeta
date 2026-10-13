@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "DEFAULT_DPI",
     "DEFAULT_PADDING",
+    "MAX_AREA_RATIO",
     "NORMALIZED_MAX",
     "SUPPORTED_SUFFIXES",
     "CarriedContext",
@@ -56,6 +57,7 @@ __all__ = [
     "denormalize_bbox",
     "detect_figures",
     "extract_and_save_figures",
+    "crop_figure_bytes",
     "normalize_bbox",
     "open_document",
     "placeholder_for",
@@ -74,6 +76,12 @@ NORMALIZED_MAX = 1000
 
 #: Padding preventivo por defecto (1.5 % del tamaño de página).
 DEFAULT_PADDING = 0.015
+
+#: Fracción máxima del área de página que puede ocupar una figura. Un candidato
+#: que cubre la página entera es, casi siempre, el fondo del documento o la
+#: imagen de un escaneo, no un diagrama: se descarta para no capturar la hoja
+#: completa como ``fig:N``.
+MAX_AREA_RATIO = 0.6
 
 #: Puntos por pulgada en el espacio de coordenadas de PDF.
 POINTS_PER_INCH = 72.0
@@ -362,18 +370,36 @@ def _merge_rects(rects: list[fitz.Rect], gap: float) -> list[fitz.Rect]:
 # ---------------------------------------------------------------------------
 
 
+def _is_rule_like(rect: fitz.Rect, page_rect: fitz.Rect) -> bool:
+    """Indica si un candidato parece una regla/línea decorativa y no una figura.
+
+    Las subrayados, tablas interiores o filos de página son rectángulos
+    extremadamente finos y alargados que, fusionados, ensucian la detección:
+    se descartan cuando ocupan al menos la mitad de la dimensión mayor de la
+    página en una de sus dos direcciones.
+    """
+    if page_rect.width <= 0 or page_rect.height <= 0:
+        return False
+    horizontal = rect.height <= 2 and rect.width >= 0.5 * page_rect.width
+    vertical = rect.width <= 2 and rect.height >= 0.5 * page_rect.height
+    return horizontal or vertical
+
+
 def detect_figures(
     page: fitz.Page,
     *,
     include_drawings: bool = True,
     min_area_ratio: float = 0.004,
+    max_area_ratio: float = MAX_AREA_RATIO,
     max_figures: int = 50,
 ) -> list[FigureReference]:
     """Detecta figuras relevantes de una página y las devuelve normalizadas.
 
     Combina las imágenes embebidas (``get_images``/``get_image_rects``) con los
     dibujos vectoriales (``get_drawings``), descarta los elementos diminutos y
-    asigna identificadores ``fig:N`` en orden de lectura.
+    las líneas decorativas y filtra los candidatos que cubren casi toda la
+    página (fondos/escaneos), de modo que una hoja completa nunca se declare
+    como ``fig:N``. Asigna identificadores ``fig:N`` en orden de lectura.
     """
     page_rect = page.rect
     page_area = max(page_rect.width * page_rect.height, 1.0)
@@ -388,14 +414,15 @@ def detect_figures(
     if include_drawings:
         for drawing in page.get_drawings():
             rect = fitz.Rect(drawing.get("rect", fitz.EMPTY_RECT))
-            if not rect.is_empty:
-                candidates.append(rect)
+            if rect.is_empty or _is_rule_like(rect, page_rect):
+                continue
+            candidates.append(rect)
 
     merged = _merge_rects(candidates, gap=2.0)
     relevant = [
         rect
         for rect in merged
-        if (rect.width * rect.height) / page_area >= min_area_ratio
+        if min_area_ratio <= (rect.width * rect.height) / page_area <= max_area_ratio
         and rect.width > 1
         and rect.height > 1
     ]
@@ -581,6 +608,49 @@ def extract_and_save_figures(
                 "figura %s recortada en página %d -> %s", figure_id, page_index, destination
             )
     return crops
+
+
+def crop_figure_bytes(
+    source: str | Path,
+    page_index: int,
+    bbox: Sequence[int],
+    *,
+    dpi: int = DEFAULT_DPI,
+    padding: float = DEFAULT_PADDING,
+) -> bytes:
+    """Recorta una región normalizada de una página y devuelve sus bytes PNG.
+
+    Usa la misma geometría que :func:`extract_and_save_figures` (padding
+    preventivo, desnormalización y rasterización del clip), pero devuelve los
+    bytes en memoria: así la UI puede sobrescribir un asset en S3 sin tocar el
+    sistema de archivos ni dejar copias temporales.
+
+    Raises:
+        ImageExtractionError: si la página está fuera de rango, la BBox es
+            degenerada o el recorte falla.
+    """
+    with open_document(source) as document:
+        if page_index < 0 or page_index >= document.page_count:
+            raise ImageExtractionError(
+                f"índice de página {page_index} fuera de rango (0..{document.page_count - 1})"
+            )
+        page = document.load_page(page_index)
+        is_pdf = _document_is_pdf(document)
+        page_rect = page.rect
+        native = None if is_pdf else _image_native_size(source)
+        zoom = _page_zoom(page, is_pdf, dpi, native)
+        x0, y0, x1, y1 = denormalize_bbox(bbox, page_rect.width, page_rect.height, padding=padding)
+        if x1 - x0 <= 0 or y1 - y0 <= 0:
+            raise ImageExtractionError(f"BBox degenerada al recortar: {bbox}")
+        try:
+            pixmap = page.get_pixmap(
+                matrix=fitz.Matrix(zoom, zoom), clip=fitz.Rect(x0, y0, x1, y1), alpha=False
+            )
+        except Exception as exc:  # noqa: BLE001 - PyMuPDF lanza tipos variados
+            raise ImageExtractionError(
+                f"no se pudo recortar la figura de la página {page_index}: {exc}"
+            ) from exc
+    return pixmap.tobytes("png")
 
 
 def upload_crops(

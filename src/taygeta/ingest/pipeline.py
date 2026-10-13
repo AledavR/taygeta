@@ -363,7 +363,7 @@ class IngestPipeline:
         page_figures = [figure for figure in figures if figure.page == page_index]
         if not page_figures:
             return ""
-        lines = ["Figuras detectadas en esta página:"]
+        lines = ["Figuras detectadas por geometría en esta página:"]
         for figure in page_figures:
             ymin, xmin, ymax, xmax = figure.bbox
             lines.append(
@@ -371,8 +371,11 @@ class IngestPipeline:
                 f"ymax={ymax}, xmax={xmax}]"
             )
         lines.append(
-            "Inserta el placeholder {{fig:N}} de cada figura en el punto exacto "
-            "del flujo de lectura donde aparece."
+            "No todas estas regiones son necesariamente diagramas útiles: puede "
+            "haber fondos, logotipos o páginas escaneadas. Inserta el placeholder "
+            "{{fig:N}} SOLO si el enunciado depende explícitamente de un gráfico, "
+            "diagrama o ilustración dentro de esa región; si no hay tal figura, no "
+            "insertes ningún placeholder ni declares fig:N."
         )
         return "\n".join(lines)
 

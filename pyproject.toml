@@ -19,6 +19,8 @@ dependencies = [
     "pymupdf>=1.25.0",
     "pillow>=11.0.0",
     "streamlit>=1.40.0",
+    # Recorte manual de figuras (bounding box) en la revisión HITL.
+    "streamlit-cropper>=0.3.1,<1",
     "pandoc>=2.4",
     "boto3>=1.35.0",
     # Conversor LaTeX↔Typst en Rust (tylax) para las fórmulas del transpilador.

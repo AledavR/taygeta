@@ -465,7 +465,10 @@ curl -fL "http://localhost:8000/download/fuente_examen_${EXAM_ID}.zip" -o fuente
 2. El pipeline ejecuta el doble pase y la validación en dos capas; cada pregunta
    queda en staging como `VALID` o `NEEDS_ATTENTION` (con motivo técnico).
 3. **Revisa** en la UI: enunciado Markdown renderizado en paralelo con la imagen
-   original (recorte de figura desde SeaweedFS o página rasterizada).
+   original (recorte de figura desde SeaweedFS o página rasterizada). Cada figura
+   puede **eliminarse** (se limpia su `{{fig:N}}` del enunciado) o **recortarse
+   manualmente** dibujando un bounding box sobre la página original; el recorte
+   se sobrescribe en SeaweedFS y la vista previa se refresca al instante.
 4. **Edita** enunciado, tipo, alternativas, dificultad (1–5), curso/tema/subtema y
    prerrequisitos. Aporta contexto correctivo y pulsa **Reanalizar** si hace falta.
 5. **Confirma** para persistir en `taygeta.db`. La corrección manual prevalece
@@ -548,7 +551,8 @@ los servicios externos no desplegados):
 - **SQLite/FTS5**: inicialización idempotente, sincronización de `questions_fts`
   en altas/actualizaciones/borrados y consultas parametrizadas.
 - **Extracción**: rasterizado 300 DPI, desnormalización con padding 1.5 %, recorte
-  de figuras.
+  de figuras, descarte de candidatos que cubren la página completa (escaneos,
+  fondos o dibujos de marco) y re-recorte manual desde la UI.
 - **Transpilador**: conversión TeX→Typst delegada a **tylax** (corpus de oro de
   fórmulas: fracciones, raíces, matrices `pmatrix`, `cases`, `aligned`, scripts,
   sumatorias/integrales/límites) y **compilación real** de PDF con Typst.
@@ -558,9 +562,9 @@ los servicios externos no desplegados):
   descarga; `docker compose config` para base + ROCm + CUDA.
 
 > La suite automatizada `tests/` (pytest) empieza a incorporar estos casos
-> (sanitización de delimitadores y conversión TeX→Typst con tylax). Los casos que
-> dependen de GPU o de un proveedor LLM/OCR reales solo pueden completarse en el
-> host de despliegue.
+> (sanitización de delimitadores, conversión TeX→Typst con tylax y edición de
+> figuras). Los casos que dependen de GPU o de un proveedor LLM/OCR reales solo
+> pueden completarse en el host de despliegue.
 
 ---
 

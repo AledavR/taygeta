@@ -3694,6 +3694,21 @@ wheels = [
 ]
 
 [[package]]
+name = "streamlit-cropper"
+version = "0.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "pillow" },
+    { name = "streamlit" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/0f/74/d1729570d91b09b83fb05ed94ee7ff88e3e756ad27836639b69a12817875/streamlit_cropper-0.3.1.tar.gz", hash = "sha256:7d22befae2dd861ea9ac8ca65e1fa6c27af25e9350b365ee2d3d043d81ff76fe", size = 803477, upload-time = "2025-06-03T15:53:09.313Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/44/db/955b8d957acde8b61f7669f2f1ae4cab4e9bad44211a186a7c6558d45656/streamlit_cropper-0.3.1-py3-none-any.whl", hash = "sha256:26630e5366c9f0f8ed391d8bd7ab8386acf42cd9f30dd6e708b9b32beeef57e1", size = 810647, upload-time = "2025-06-03T15:53:07.798Z" },
+]
+
+[[package]]
 name = "sympy"
 version = "1.14.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3721,6 +3736,7 @@ dependencies = [
     { name = "pymupdf" },
     { name = "sentence-transformers" },
     { name = "streamlit" },
+    { name = "streamlit-cropper" },
     { name = "torch", version = "2.14.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
     { name = "torch", version = "2.14.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
     { name = "tylax" },
@@ -3749,6 +3765,7 @@ requires-dist = [
     { name = "pymupdf", specifier = ">=1.25.0" },
     { name = "sentence-transformers", specifier = ">=3.0.0" },
     { name = "streamlit", specifier = ">=1.40.0" },
+    { name = "streamlit-cropper", specifier = ">=0.3.1,<1" },
     { name = "torch", specifier = ">=2.0.0", index = "https://download.pytorch.org/whl/cpu" },
     { name = "tylax", specifier = ">=0.3.8,<1" },
 ]

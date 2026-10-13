@@ -21,6 +21,8 @@ como válida.
 
 from __future__ import annotations
 
+import hashlib
+import io
 import logging
 import re
 import uuid
@@ -30,11 +32,14 @@ from pathlib import Path
 from typing import Any
 
 import streamlit as st
+from PIL import Image
+from streamlit_cropper import st_cropper
 
 from taygeta.agents.embeddings import Embedder, question_embedding_text
 from taygeta.core.schema import (
     Choice,
     EnrichedQuestion,
+    FigureReference,
     QuestionRaw,
     TranscriptionIntermediate,
     get_public_url,
@@ -47,6 +52,9 @@ from taygeta.core.settings import Settings, get_settings
 from taygeta.core.urls import build_relative_path, split_asset_reference
 from taygeta.domain.taxonomy import format_course_name
 from taygeta.ingest.image_extractor import (
+    DEFAULT_DPI,
+    PageRaster,
+    crop_figure_bytes,
     is_supported_source,
     open_document,
     rasterize_page,
@@ -55,6 +63,12 @@ from taygeta.ingest.pipeline import IngestPipeline, StagedQuestion, StagingResul
 from taygeta.ingest.validator import STATUS_NEEDS_ATTENTION, STATUS_VALID
 from taygeta.server.db import Database, DatabaseError
 from taygeta.server.object_storage import ObjectStorage, ObjectStorageError
+from taygeta.ui.figure_editing import (
+    bbox_to_pixel_box,
+    pixel_box_to_normalized_bbox,
+    reconcile_figures_with_statement,
+    strip_figure_placeholder,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +108,7 @@ def _slug_split(text: str | None) -> list[str]:
 # ---------------------------------------------------------------------------
 
 #: Claves de ``st.session_state`` que contienen preguntas en staging y su origen.
-_STAGING_STATE_KEYS = ("staging_result", "processed_path", "staged_questions")
+_STAGING_STATE_KEYS = ("staging_result", "processed_path", "staged_questions", "_orphan_assets")
 
 #: Prefijos de los controles de revisión (widgets) asociados a cada pregunta.
 _STAGING_WIDGET_PREFIXES = (
@@ -111,6 +125,7 @@ _STAGING_WIDGET_PREFIXES = (
     "hint_",
     "approve_",
     "refine_",
+    "fig_",
 )
 
 
@@ -209,6 +224,160 @@ def page_image_bytes(source_path: str | Path, page_index: int, *, dpi: int = 150
         return None
 
 
+def page_image_raster(
+    source_path: str | Path, page_index: int, *, dpi: int = 150
+) -> PageRaster | None:
+    """Devuelve la ``PageRaster`` de una página para el cropper (bytes + tamaño).
+
+    ``PageRaster`` expone ``png_bytes`` y ``width_px``/``height_px``, que se
+    necesitan tanto para alimentar el recorte manual como para convertir el
+    recuadro de píxeles a la BBox normalizada.
+    """
+    try:
+        with open_document(source_path) as document:
+            if page_index < 0 or page_index >= document.page_count:
+                return None
+            page = document.load_page(page_index)
+            is_pdf = bool(getattr(document, "is_pdf", False))
+            return rasterize_page(page, dpi=dpi, is_pdf=is_pdf)
+    except Exception as exc:  # noqa: BLE001 - la vista previa nunca debe romper la UI
+        logger.warning("no se pudo rasterizar la página %s: %s", page_index, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Edición de figuras en la revisión (estado de sesión)
+# ---------------------------------------------------------------------------
+
+
+def _figures_state(index: int, default: Sequence[Any]) -> list[dict[str, Any]]:
+    """Devuelve las figuras editables de la pregunta ``index`` como dicts.
+
+    Siembra ``st.session_state["figures_{index}"]`` desde ``default`` (las
+    figuras del enunciado estructurado) la primera vez; a partir de ahí, la
+    lista en sesión es la fuente de verdad que refleja borrados y recortes.
+    """
+    key = f"figures_{index}"
+    if key not in st.session_state:
+        st.session_state[key] = [
+            figure if isinstance(figure, dict) else figure.model_dump(mode="json")
+            for figure in default
+        ]
+    return st.session_state[key]
+
+
+def _reset_figures_state(index: int, figures: Sequence[Any]) -> None:
+    """Reemplaza el estado de figuras de la pregunta ``index`` tras reanalizar."""
+    st.session_state[f"figures_{index}"] = [
+        figure if isinstance(figure, dict) else figure.model_dump(mode="json") for figure in figures
+    ]
+
+
+def _register_orphan(question_id: str, asset_path: str | None) -> None:
+    """Registra un asset de figura como huérfano para purgarlo al confirmar.
+
+    El borrado físico se difiere a la confirmación de la pregunta para no
+    destruir el objeto si el usuario abandona la revisión.
+    """
+    if not asset_path:
+        return
+    orphans = st.session_state.setdefault("_orphan_assets", {})
+    orphans.setdefault(question_id, set()).add(asset_path)
+
+
+def _delete_asset(storage: ObjectStorage | None, asset_path: str) -> None:
+    """Borra un asset por su referencia estable (best-effort, nunca bloquea)."""
+    if storage is None:
+        return
+    try:
+        bucket, key = split_asset_reference(asset_path, default_bucket=storage.bucket)
+        storage.delete(key, bucket=bucket or None)
+    except (ObjectStorageError, ValueError) as exc:
+        logger.warning("no se pudo purgar el asset huérfano %s: %s", asset_path, exc)
+
+
+def _purge_orphan_assets(confirmed_ids: set[str], storage: ObjectStorage | None) -> None:
+    """Borra los assets huérfanos de las preguntas efectivamente confirmadas."""
+    orphans = st.session_state.pop("_orphan_assets", {})
+    for question_id in confirmed_ids:
+        for asset_path in orphans.get(question_id, set()):
+            _delete_asset(storage, asset_path)
+
+
+def _remove_figure(index: int, figure_id: str) -> None:
+    """Elimina una figura del estado y limpia su placeholder del enunciado.
+
+    Extrae la figura del estado de sesión de la pregunta ``index`` y elimina
+    automáticamente todos los ``{{fig:N}}`` correspondientes del enunciado
+    (``statement_{index}``), conservando la correspondencia uno a uno que exige
+    ``QuestionRaw``. Registra el asset como huérfano para purgarlo al confirmar.
+    """
+    key = f"figures_{index}"
+    figures = st.session_state.get(key, [])
+    removed = [figure for figure in figures if figure.get("id") == figure_id]
+    st.session_state[key] = [figure for figure in figures if figure.get("id") != figure_id]
+    statement_key = f"statement_{index}"
+    current = st.session_state.get(statement_key)
+    if isinstance(current, str):
+        st.session_state[statement_key] = strip_figure_placeholder(current, figure_id)
+
+    result = st.session_state.get("staging_result")
+    question = (
+        result.questions[index].question
+        if result is not None and 0 <= index < len(result.questions)
+        else None
+    )
+    question_id = getattr(question, "id", None)
+    for figure in removed:
+        _register_orphan(str(question_id), figure.get("asset_path"))
+
+
+def _replace_figure_crop(
+    index: int,
+    figure_id: str,
+    new_bbox: list[int],
+    source_path: str | None,
+    storage: ObjectStorage | None,
+) -> None:
+    """Re-recorta una figura y sobrescribe su asset en el almacenamiento.
+
+    Recorta la región indicada del documento origen a 300 DPI y sobrescribe el
+    objeto existente en SeaweedFS (misma clave), de modo que ``asset_path`` no
+    cambia. Actualiza el estado de sesión con la nueva BBox para refrescar la
+    vista previa en el siguiente render.
+
+    Raises:
+        ValueError: si la figura no tiene clave de asset o el origen no permite
+            recortar.
+        ImageExtractionError: si el recorte falla.
+    """
+    if source_path is None:
+        raise ValueError("no hay documento de origen disponible para recortar")
+    figures = st.session_state.get(f"figures_{index}", [])
+    updated: list[dict[str, Any]] = []
+    for figure in figures:
+        if figure.get("id") != figure_id:
+            updated.append(figure)
+            continue
+        asset_path = figure.get("asset_path")
+        if not asset_path:
+            raise ValueError(
+                f"la figura {figure_id} no tiene asset persistente; no se puede sobrescribir"
+            )
+        bucket, key = split_asset_reference(asset_path, default_bucket=storage.bucket)
+        png = crop_figure_bytes(
+            source_path,
+            int(figure.get("page", 0)),
+            new_bbox,
+            dpi=DEFAULT_DPI,
+        )
+        if storage is None:
+            raise ValueError("almacenamiento no disponible para guardar el recorte")
+        storage.put_bytes(key, png, content_type="image/png", bucket=bucket or None)
+        updated.append({**figure, "bbox": list(new_bbox)})
+    st.session_state[f"figures_{index}"] = updated
+
+
 def public_s3_url(url: str | None, settings: Settings) -> str:
     """Reescribe el endpoint interno de S3 por el público de la UI.
 
@@ -259,6 +428,7 @@ def build_enriched_question(
     difficulty: int,
     prerequisites: Sequence[str],
     source_metadata: dict[str, Any] | None = None,
+    figures: Sequence[FigureReference] | None = None,
 ) -> EnrichedQuestion:
     """Compone una :class:`EnrichedQuestion` a partir de los campos revisados.
 
@@ -267,14 +437,16 @@ def build_enriched_question(
     válidos (``^[a-z0-9_]+$``) para evitar ``ValidationError``; si ``course`` o
     ``topic`` quedan vacíos se usa ``"general"`` y el ``subtopic`` vacío se
     convierte en ``None``. Los prerrequisitos se normalizan igual y se descartan
-    los que queden vacíos.
+    los que queden vacíos. ``figures`` permite sustituir las figuras de
+    ``base.figures`` con la selección editada en la revisión (borrados y
+    recortes); si se omite, se conservan las originales.
     """
     return EnrichedQuestion(
         id=base.id,
         statement_raw=base.statement_raw,
         question_type=base.question_type,
         choices=base.choices,
-        figures=base.figures,
+        figures=figures if figures is not None else base.figures,
         notation_notes=base.notation_notes,
         course=_normalize_slug(course),
         topic=_normalize_slug(topic),
@@ -387,28 +559,102 @@ def _resources() -> tuple[Settings, Database, ObjectStorage, IngestPipeline]:
 # ---------------------------------------------------------------------------
 
 
-def _render_reference_image(
+def _cache_busted_public_url(asset_path: str | None, settings: Settings, seed: Any = "") -> str:
+    """URL pública de una figura con parámetro de versión anti-caché.
+
+    La vista previa lee los bytes directamente de SeaweedFS (sin caché de
+    navegador); el enlace externo añade ``?v=`` derivado del asset y de la BBox
+    para que el navegador no sirva una versión antigua tras un recorte.
+    """
+    url = public_asset_url(asset_path, settings)
+    if not url:
+        return ""
+    token = hashlib.sha256(f"{asset_path}|{seed}".encode()).hexdigest()[:8]
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}v={token}"
+
+
+def _render_figure_cropper(
+    index: int,
+    figure: dict[str, Any],
     source_path: str | None,
-    staged: StagedQuestion,
     storage: ObjectStorage | None,
-    container: Any,
+) -> None:
+    """Despliega el recorte manual (bounding box) para una figura concreta."""
+    figure_id = figure.get("id") or "fig:?"
+    page_index = int(figure.get("page", 0))
+    bbox = figure.get("bbox")
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        bbox = [0, 0, 0, 0]
+    with st.expander(f"Recortar manualmente — {figure_id}"):
+        raster = page_image_raster(source_path, page_index)
+        if raster is None:
+            st.caption("No hay documento de origen para recortar esta figura.")
+            return
+        buffer = io.BytesIO(raster.png_bytes)
+        image = Image.open(buffer)
+        image.load()
+        crop_key = f"fig_crop_{index}_{figure_id}"
+        default_coords = bbox_to_pixel_box(bbox, raster.width_px, raster.height_px)
+        try:
+            box = st_cropper(
+                image,
+                realtime_update=True,
+                default_coords=default_coords,
+                return_type="box",
+                key=crop_key,
+            )
+        except Exception as exc:  # noqa: BLE001 - el cropper nunca debe romper la revisión
+            st.error(f"No se pudo inicializar el recorte: {exc}")
+            return
+        if st.button("Aplicar recorte", key=f"fig_crop_apply_{index}_{figure_id}"):
+            try:
+                new_bbox = pixel_box_to_normalized_bbox(box, raster.width_px, raster.height_px)
+                _replace_figure_crop(index, figure_id, new_bbox, source_path, storage)
+            except Exception as exc:  # noqa: BLE001 - se informa al usuario, no se oculta
+                st.error(f"No se pudo aplicar el recorte de {figure_id}: {exc}")
+                return
+            st.success(f"{figure_id} recortada y guardada.")
+            st.rerun()
+
+
+def _render_figure_review(
+    index: int,
+    staged: StagedQuestion,
+    source_path: str | None,
+    storage: ObjectStorage | None,
     settings: Settings,
 ) -> None:
-    """Muestra el recorte de figura o la página original junto al enunciado."""
+    """Muestra las figuras de la pregunta con borrado rápido y recorte manual.
+
+    La lista de figuras del estado de sesión (``figures_{index}``) es la fuente
+    de verdad durante la revisión: refleja los borrados y recortes. Por figura
+    se muestra el recorte (bytes frescos de SeaweedFS), un botón para
+    eliminarla (que limpia también su ``{{fig:N}}`` del enunciado) y un recorte
+    manual con el cropper sobre la página original del documento.
+    """
     question = staged.question
-    figures = question.figures if question is not None else []
+    figures = _figures_state(index, question.figures if question is not None else [])
     shown = False
     for figure in figures:
-        data = figure_bytes(storage, figure.asset_path)
-        public_url = public_asset_url(figure.asset_path, settings)
+        figure_id = figure.get("id") or "fig:?"
+        page_index = int(figure.get("page", 0))
+        asset_path = figure.get("asset_path")
+        bbox = figure.get("bbox") or [0, 0, 0, 0]
+        data = figure_bytes(storage, asset_path)
+        public_url = _cache_busted_public_url(asset_path, settings, seed=bbox)
         if data:
-            container.image(data, caption=f"{figure.id} — recorte (página {figure.page})")
+            st.image(data, caption=f"{figure_id} — recorte (página {page_index})")
             shown = True
         elif public_url:
-            container.image(public_url, caption=f"{figure.id} — recorte (página {figure.page})")
+            st.image(public_url, caption=f"{figure_id} — recorte (página {page_index})")
             shown = True
         if public_url:
-            container.caption(f"[Abrir {figure.id} en el navegador]({public_url})")
+            st.caption(f"[Abrir {figure_id} en el navegador]({public_url})")
+        if st.button("Eliminar figura", key=f"fig_delete_{index}_{figure_id}", type="secondary"):
+            _remove_figure(index, figure_id)
+            st.rerun()
+        _render_figure_cropper(index, figure, source_path, storage)
     if shown or source_path is None:
         return
     pages = [0]
@@ -417,7 +663,7 @@ def _render_reference_image(
     for page_index in pages:
         data = page_image_bytes(source_path, page_index)
         if data:
-            container.image(data, caption=f"Página original {page_index}")
+            st.image(data, caption=f"Página original {page_index}")
 
 
 def _taxonomy_defaults(staged: StagedQuestion) -> dict[str, Any]:
@@ -577,6 +823,8 @@ def _refine_question(index: int) -> None:
     result.questions[index] = refined
     st.session_state["staging_result"] = result
     _sync_question_widgets(index, refined)
+    if refined.question is not None:
+        _reset_figures_state(index, refined.question.figures)
 
 
 def _render_review(
@@ -653,7 +901,7 @@ def _render_review(
             with right:
                 st.caption("Enunciado renderizado")
                 st.markdown(new_statement)
-                _render_reference_image(source_path, staged, storage, st, settings)
+                _render_figure_review(index, staged, source_path, storage, settings)
 
             st.text_input(
                 "Contexto correctivo (p. ej. «La condición ilegible es g(x) = ...»)",
@@ -673,6 +921,14 @@ def _render_review(
                 _render_taxonomy_controls(index, database, staged)
             )
 
+            # Reconciliar figuras editadas con el enunciado (correspondencia 1:1).
+            edited_figures = _figures_state(index, base.figures)
+            efectivas, huerfanas, colgantes = reconcile_figures_with_statement(
+                edited_figures, new_statement
+            )
+            for figure in huerfanas:
+                _register_orphan(base.id, figure.get("asset_path"))
+
             approved_question = build_enriched_question(
                 base,
                 course=course.strip(),
@@ -681,6 +937,7 @@ def _render_review(
                 difficulty=difficulty,
                 prerequisites=[*prerequisites, *new_prereqs],
                 source_metadata={"source_reference": result.source_reference},
+                figures=[FigureReference.model_validate(figure) for figure in efectivas],
             )
             # Reflejar la edición manual en el objeto que se usará al confirmar.
             # ``model_copy`` no revalida: sanitiza el enunciado manual para no
@@ -692,12 +949,18 @@ def _render_review(
                     "choices": new_choices,
                 }
             )
+            if colgantes:
+                st.error(
+                    "El enunciado referencia placeholders sin figura declarada: "
+                    + ", ".join(sorted(colgantes))
+                    + ". Elimina el placeholder o restaura la figura para poder aprobar."
+                )
             approve = st.checkbox(
                 "Aprobar y guardar esta pregunta",
-                value=staged.status == STATUS_VALID,
+                value=staged.status == STATUS_VALID and not colgantes,
                 key=f"approve_{index}",
             )
-            if approve:
+            if approve and not colgantes:
                 approved.append((approved_question, new_prereqs))
 
     st.divider()
@@ -737,6 +1000,7 @@ def _confirm(
         storage,
         session_id=result.session_id,
     )
+    _purge_orphan_assets(set(confirm_result.saved), storage)
     if confirm_result.saved:
         st.success(f"Persistidas {len(confirm_result.saved)} pregunta(s) en taygeta.db.")
     for error in confirm_result.errors:
