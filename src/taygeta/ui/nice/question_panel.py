@@ -150,7 +150,7 @@ class QuestionPanel:
                 for figure in (self.base.figures or [])
             ]
             session.questions[index] = self.qstate
-        self.view = "Figuras"
+        self.view = "Página original"
         self._colgantes: list[str] = []
 
         # Referencias a los widgets (para confirmar y para reescribir tras un reanálisis).
@@ -202,8 +202,13 @@ class QuestionPanel:
             if base is None:
                 ui.label("No hay enunciado estructurado para editar en esta pregunta.")
                 return
-            with ui.row().classes("w-full items-start gap-4"):
-                with ui.column().classes("w-3/5 gap-3"):
+            # Sistema de dos columnas: a la izquierda el texto reconocido, la
+            # vista formateada y los metadatos; a la derecha las figuras y la
+            # página original en pestañas. Se usa un grid (no un row) porque
+            # ``ui.row`` es ``flex-wrap: wrap`` y las columnas con gap se
+            # apilarían al superar el 100% de ancho.
+            with ui.grid().classes("w-full gap-4 grid-cols-1 lg:grid-cols-5 items-start"):
+                with ui.column().classes("col-span-1 lg:col-span-3 gap-3 min-w-0"):
                     self._build_editor()
                     self._build_taxonomy()
                     self._build_advanced()
@@ -213,15 +218,15 @@ class QuestionPanel:
                         "Aprobar y guardar esta pregunta", value=staged.status == STATUS_VALID
                     )
                     self._sync_status()
-                with ui.column().classes("w-2/5 gap-3"):
-                    with ui.radio(
-                        ["Figuras", "Página original"],
-                        value="Figuras",
+                with ui.column().classes("col-span-1 lg:col-span-2 gap-3 min-w-0"):
+                    with ui.tabs(
+                        value="Página original",
                         on_change=lambda e: self._set_view(e.value),
-                    ) as view_radio:
-                        view_radio.props("inline")
+                    ).classes("w-full"):
+                        ui.tab("Página original", label="Imagen original")
+                        ui.tab("Figuras", label="Figuras nuevas")
                     self.right_body = ui.column().classes("w-full gap-2")
-                    self._set_view("Figuras")
+                    self._set_view("Página original")
 
     def _build_editor(self) -> None:
         base = self.base
@@ -394,6 +399,10 @@ class QuestionPanel:
         if self.right_body is None:
             return
         self.right_body.clear()
+        # Al salir de «Figuras» invalidamos la referencia para que las
+        # actualizaciones (refine, borrado) no intenten redibujar sobre una
+        # vista ya destruida; se reconstruye al volver a la pestaña.
+        self.figures_area = None
         with self.right_body:
             if view == "Figuras":
                 self.figures_area = ui.column().classes("w-full gap-2")
@@ -480,7 +489,7 @@ class QuestionPanel:
         return handler
 
     def _render_add_area(self) -> None:
-        with ui.expansion("➕ Añadir nueva figura"):
+        with ui.expansion("➕ Añadir nueva figura") as add_exp:
             page_count = document_page_count(self.source_path)
             if page_count is None or page_count <= 0:
                 caption("No hay documento de origen para añadir figuras.")
@@ -521,8 +530,10 @@ class QuestionPanel:
                         "dense"
                     )
 
-            page_select.on_change(lambda _e: show_cropper())
-            show_cropper()
+            page_select.on_value_change(lambda _e: show_cropper())
+            # El cropper se dibuja al abrir la expansión (no en build time) para
+            # no rasterizar una página por cada panel al construir la revisión.
+            add_exp.on_value_change(lambda e: show_cropper() if e.value else None)
 
     def _add_figure(self, pending: dict[str, Any], dims: dict[str, int]) -> Any:
         async def handler() -> None:

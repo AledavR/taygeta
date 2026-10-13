@@ -146,9 +146,65 @@ async def test_question_panels_build_and_switch_view(ui_env: None) -> None:
         await user.should_see(content="Pregunta 2 — NEEDS_ATTENTION")
         await user.should_see("Aprobar y guardar esta pregunta")
         await user.should_see("Alternativa 1 — id")
-        await user.should_see("➕ Añadir nueva figura")
         await user.should_see("Opciones Avanzadas")
 
-        # Interacción: cambiar a la vista de página original.
-        user.find("Página original").click()
+        # La vista por defecto de la columna derecha es «Imagen original».
+        await user.should_see("Imagen original")
         await user.should_see("No hay documento de origen para mostrar.")
+
+        # Al cambiar a «Figuras nuevas» aparece la gestión de figuras.
+        user.find("Figuras nuevas").click()
+        await user.should_see("➕ Añadir nueva figura")
+
+
+async def test_add_figure_area_renders_cropper_with_real_source(
+    ui_env: None, tmp_path: Path
+) -> None:
+    """Regresión: con un origen real el alta de figuras dibuja el cropper.
+
+    Antes, ``_render_add_area`` llamaba a ``Select.on_change`` (inexistente en
+    NiceGUI 3), lo que abortaba la construcción del panel y solo dejaba ver la
+    primera pregunta y un selector de página vacío.
+    """
+    from nicegui.testing import user_simulation
+    from PIL import Image
+
+    settings = get_settings()
+    database = Database(settings=settings)
+    staged = _make_questions()[:1]
+    source = tmp_path / "pagina.png"
+    Image.new("RGB", (800, 1000), "white").save(source)
+
+    def root() -> None:
+        session = SessionState()
+        session.questions = {0: QuestionState()}
+        QuestionPanel(
+            ui.column().classes("w-full"),
+            index=0,
+            staged=staged[0],
+            session=session,
+            source_path=str(source),
+            storage=_StubStorage(),
+            settings=settings,
+            database=database,
+            pipeline=None,
+        )
+
+    async with user_simulation(root=root) as user:
+        await user.open("/")
+        await user.should_see("Pregunta 1 — VALID")
+
+        # Cambiar a la pestaña de figuras: aquí se construía el alta de figuras.
+        user.find("Figuras nuevas").click()
+        await user.should_see("➕ Añadir nueva figura")
+
+        # Desplegar el alta dibuja el cropper (render diferido).
+        add_expansion = next(
+            element
+            for element in user.find("➕ Añadir nueva figura").elements
+            if isinstance(element, ui.expansion)
+        )
+        with user:
+            add_expansion.value = True
+        await user.should_see("Arrastra y suelta para seleccionar la figura")
+        await user.should_see("Añadir figura")
